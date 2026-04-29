@@ -78,9 +78,14 @@ pub trait EnclaveSigner: EnclaveKeyManager {
     /// `cache_ttl_secs == 0` collapses `Cached` into `Strict`.
     ///
     /// The default impl ignores `mode` and `cache_ttl_secs` and falls back
-    /// to [`sign`]. Backends that can honour a reusable user-presence
-    /// authentication (today: macOS) override this; software / TPM
-    /// backends keep the default because their gate is per-call regardless.
+    /// to [`sign`]. Only macOS overrides this; it batches Touch ID prompts
+    /// within `cache_ttl_secs` when `PresenceMode::Cached`.
+    ///
+    /// Linux TPM and software backends keep the default. Neither enforces
+    /// user presence at sign time — `AccessPolicy` is stored in key metadata
+    /// but is not consulted during signing. Keys created with
+    /// `AccessPolicy::Any` or `AccessPolicy::BiometricOnly` on Linux sign
+    /// without any interactive prompt.
     fn sign_with_presence(
         &self,
         label: &str,

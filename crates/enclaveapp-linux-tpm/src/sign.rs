@@ -179,6 +179,9 @@ impl EnclaveKeyManager for LinuxTpmSigner {
 
 impl EnclaveSigner for LinuxTpmSigner {
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
+        // AccessPolicy is stored in key metadata but is not enforced here.
+        // The TPM key uses empty authorization; no user prompt occurs regardless
+        // of the policy recorded at generation time.
         validate_label(label)?;
         let (mut ctx, key_handle) = self.load_key(label)?;
 

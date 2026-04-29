@@ -79,6 +79,9 @@ impl EnclaveSigner for SoftwareSigner {
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         use p256::ecdsa::{signature::Signer, SigningKey};
 
+        // AccessPolicy is stored in key metadata but is not enforced here.
+        // The private key is loaded from the keyring and signs without any
+        // user prompt, regardless of the policy recorded at generation time.
         validate_label(label)?;
         let secret = key_storage::load_secret_key(&self.config, label)?;
         let signing_key = SigningKey::from(&secret);
