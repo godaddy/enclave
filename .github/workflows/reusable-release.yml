@@ -470,10 +470,28 @@ jobs:
           BUNDLE_PATH: ${{ steps.app_bundle.outputs.bundle_path }}
         run: |
           if [ "$RUNNER_OS" = "macOS" ] && [ -n "$BUNDLE_PATH" ]; then
-            # .app mode: tar the signed bundle directly. The Homebrew
-            # formula installs <app>.app into Cellar/ and symlinks the
-            # CLI binaries inside Contents/MacOS/ from /opt/homebrew/bin.
-            tar czf "${{ inputs.app_name }}-${{ matrix.target }}.tar.gz" "$BUNDLE_PATH"
+            # .app mode: tar the signed bundle alongside a small VERSION
+            # sentinel file at the top level. Without the sentinel the
+            # tarball has only `<app>.app/` as its single top-level
+            # entry, which makes Homebrew auto-cd INTO the bundle on
+            # `brew install` — `def install` then runs with
+            # `Contents/` (not `<app>.app/Contents/`) in cwd, and the
+            # generated formula's `prefix.install "<app>.app"` step
+            # fails with `Errno::ENOENT - <app>.app`. Adding a sibling
+            # file forces Homebrew to keep the tarball's structure
+            # as-extracted so the formula sees `<app>.app/` in cwd.
+            #
+            # The VERSION file is also a useful self-describing marker
+            # if someone unpacks the tarball by hand.
+            STAGE="$RUNNER_TEMP/macos-tarball-stage"
+            rm -rf "$STAGE"
+            mkdir -p "$STAGE"
+            cp -R "$BUNDLE_PATH" "$STAGE/"
+            printf 'sshenc-version: %s\nsshenc-target: %s\n' \
+              "${{ steps.version.outputs.version }}" \
+              "${{ matrix.target }}" > "$STAGE/VERSION"
+            tar czf "${{ inputs.app_name }}-${{ matrix.target }}.tar.gz" -C "$STAGE" .
+            rm -rf "$STAGE"
             exit 0
           fi
           mkdir -p dist
