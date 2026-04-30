@@ -346,13 +346,32 @@ jobs:
           APP="${{ inputs.app_name }}.app"
           rm -rf "$APP"
           mkdir -p "$APP/Contents/MacOS"
-          # Stage binaries (and any unix_libs from extra_packaging) into the bundle.
+          # Stage binaries (executables) into the bundle. Dylibs from
+          # `extra_packaging.unix_libs` are deliberately kept OUTSIDE
+          # the bundle: Homebrew runs `install_name_tool`-style
+          # rewriting on every Mach-O it finds in the keg post-install
+          # (including inside `.app/Contents/MacOS/`), which would
+          # invalidate the bundle's `_CodeSignature/CodeResources`
+          # hashes and make Gatekeeper reject the entire bundle as
+          # "damaged." A loose `.dylib` next to the bundle can be
+          # rewritten freely without affecting the bundle's signature.
           extra='${{ inputs.extra_packaging }}'
           unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
-          for item in $BINARIES $unix_libs; do
+          for item in $BINARIES; do
             src="target/${{ matrix.target }}/release/${item}"
             if [ -f "$src" ]; then
               cp "$src" "$APP/Contents/MacOS/"
+            fi
+          done
+          # Loose dylibs alongside the bundle. The Homebrew formula
+          # generation places these via `lib.install` so they end up
+          # in `prefix/lib/` and Mach-O loaders find them via the
+          # @rpath / DYLD_LIBRARY_PATH brew sets up.
+          for lib in $unix_libs; do
+            case "$lib" in *.dylib) ;; *) continue ;; esac
+            src="target/${{ matrix.target }}/release/${lib}"
+            if [ -f "$src" ]; then
+              cp "$src" "$lib"
             fi
           done
           # Info.plist — minimum viable for AMFI + Gatekeeper. The
@@ -449,6 +468,19 @@ jobs:
               "${entitlements_arg[@]}" \
               "$BUNDLE_PATH"
             codesign --verify --strict --deep --verbose=2 "$BUNDLE_PATH"
+            # Loose dylibs alongside the bundle — sign each so they
+            # pass notarization. Skip --entitlements: a dylib doesn't
+            # launch standalone and AMFI never validates entitlements
+            # on it; what it needs is hardened-runtime + secure
+            # timestamp so notary accepts it.
+            for lib in $unix_libs; do
+              case "$lib" in *.dylib) ;; *) continue ;; esac
+              [ -f "$lib" ] || continue
+              codesign --force --sign "$IDENTITY" \
+                --options runtime --timestamp \
+                "$lib"
+              codesign --verify --strict --verbose=2 "$lib"
+            done
           else
             # Flat mode: sign each binary in target/<target>/release/.
             BINARIES="${{ steps.macos_bins.outputs.list }}"
@@ -470,23 +502,33 @@ jobs:
           BUNDLE_PATH: ${{ steps.app_bundle.outputs.bundle_path }}
         run: |
           if [ "$RUNNER_OS" = "macOS" ] && [ -n "$BUNDLE_PATH" ]; then
-            # .app mode: tar the signed bundle alongside a small VERSION
-            # sentinel file at the top level. Without the sentinel the
-            # tarball has only `<app>.app/` as its single top-level
-            # entry, which makes Homebrew auto-cd INTO the bundle on
-            # `brew install` — `def install` then runs with
-            # `Contents/` (not `<app>.app/Contents/`) in cwd, and the
-            # generated formula's `prefix.install "<app>.app"` step
-            # fails with `Errno::ENOENT - <app>.app`. Adding a sibling
-            # file forces Homebrew to keep the tarball's structure
-            # as-extracted so the formula sees `<app>.app/` in cwd.
+            # .app mode: tar the signed bundle alongside any signed
+            # loose dylibs and a small VERSION sentinel file at the
+            # top level. Two reasons for the sentinel:
             #
-            # The VERSION file is also a useful self-describing marker
-            # if someone unpacks the tarball by hand.
+            # 1. Without an additional sibling at the top level, the
+            #    tarball has only `<app>.app/` as its single top-level
+            #    entry; Homebrew auto-cd's into single-top-level
+            #    tarballs before running `def install`. That breaks
+            #    the formula's `prefix.install "<app>.app"` because
+            #    the bundle is no longer in cwd by then.
+            # 2. The VERSION file is a self-describing marker if
+            #    someone unpacks the tarball by hand.
+            #
+            # Loose dylibs (`unix_libs.*.dylib`) live alongside the
+            # bundle here — see "Stage .app bundle" for why they're
+            # not inside it.
             STAGE="$RUNNER_TEMP/macos-tarball-stage"
             rm -rf "$STAGE"
             mkdir -p "$STAGE"
             cp -R "$BUNDLE_PATH" "$STAGE/"
+            extra='${{ inputs.extra_packaging }}'
+            unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
+            for lib in $unix_libs; do
+              case "$lib" in *.dylib) ;; *) continue ;; esac
+              [ -f "$lib" ] || continue
+              cp "$lib" "$STAGE/"
+            done
             printf 'sshenc-version: %s\nsshenc-target: %s\n' \
               "${{ steps.version.outputs.version }}" \
               "${{ matrix.target }}" > "$STAGE/VERSION"
@@ -528,11 +570,25 @@ jobs:
           chmod 600 "$KEY_PATH"
 
           if [ -n "$BUNDLE_PATH" ]; then
-            # .app mode: zip the bundle and submit. notarytool accepts
-            # .zip/.pkg/.dmg containers; for .app bundles the standard
-            # is to ditto -c -k --sequesterRsrc.
+            # .app mode: zip the bundle plus any loose dylibs alongside
+            # it (which are signed separately and need notary tickets
+            # of their own). notarytool accepts a .zip with multiple
+            # top-level Mach-Os; it processes each independently and
+            # returns a single Accepted verdict for the whole upload.
+            NOTARY_STAGE="$RUNNER_TEMP/notarize-stage"
+            rm -rf "$NOTARY_STAGE"
+            mkdir -p "$NOTARY_STAGE"
+            cp -R "$BUNDLE_PATH" "$NOTARY_STAGE/"
+            extra='${{ inputs.extra_packaging }}'
+            unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
+            for lib in $unix_libs; do
+              case "$lib" in *.dylib) ;; *) continue ;; esac
+              [ -f "$lib" ] || continue
+              cp "$lib" "$NOTARY_STAGE/"
+            done
             NOTARY_ZIP="$RUNNER_TEMP/notarize.zip"
-            ditto -c -k --sequesterRsrc --keepParent "$BUNDLE_PATH" "$NOTARY_ZIP"
+            (cd "$NOTARY_STAGE" && ditto -c -k --sequesterRsrc . "$NOTARY_ZIP")
+            rm -rf "$NOTARY_STAGE"
           else
             # Flat mode: zip dist/ as before.
             NOTARY_ZIP="$RUNNER_TEMP/notarize.zip"
@@ -713,24 +769,31 @@ jobs:
           # Ruby formula, so each line is indented one extra level
           # relative to a top-level `def install`).
           mac_install_lines=""
+          extra='${{ inputs.extra_packaging }}'
+          unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
           if [ -n "$bundle_id" ]; then
             mac_install_lines="${mac_install_lines}      prefix.install \"${app}.app\"\n"
             for bin in $mac_binaries; do
               mac_install_lines="${mac_install_lines}      bin.install_symlink prefix/\"${app}.app/Contents/MacOS/${bin}\" => \"${bin}\"\n"
             done
+            # Loose dylibs alongside the bundle — Homebrew rewrites
+            # rpath / install names on these (which is the whole
+            # reason they live OUTSIDE the bundle; see "Stage .app
+            # bundle" earlier in this workflow). They land in
+            # `prefix/lib/` and get the standard Homebrew shim path.
+            for lib in $unix_libs; do
+              case "$lib" in *.dylib) ;; *) continue ;; esac
+              mac_install_lines="${mac_install_lines}      lib.install \"${lib}\"\n"
+            done
           else
             for bin in $mac_binaries; do
               mac_install_lines="${mac_install_lines}      bin.install \"${bin}\"\n"
             done
-          fi
-          extra='${{ inputs.extra_packaging }}'
-          unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
-          for lib in $unix_libs; do
-            case "$lib" in *.so) continue ;; esac
-            if [ -z "$bundle_id" ]; then
+            for lib in $unix_libs; do
+              case "$lib" in *.so) continue ;; esac
               mac_install_lines="${mac_install_lines}      lib.install \"${lib}\"\n"
-            fi
-          done
+            done
+          fi
 
           # Linux install lines — installs the full `unix_binaries` set
           # (Linux ships every binary, including stdio bridges that
