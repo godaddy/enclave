@@ -23,7 +23,14 @@ pub struct BridgeRequest {
 /// key's access policy on the wire. See THREAT_MODEL.md T5 — the
 /// legacy field opened a silent-downgrade path for a malicious bridge
 /// peer that honored `biometric` and ignored `access_policy`.
-#[derive(Debug, Serialize, Deserialize)]
+///
+/// The `webauthn_*` fields are populated only by the
+/// `webauthn_make_credential` / `webauthn_get_assertion` /
+/// `webauthn_delete_platform_credential` methods (used to give WSL
+/// callers parity with native-Windows SK keygen / sign by routing
+/// through `webauthn.dll` on the Windows host). Other methods leave
+/// them empty and the server ignores them.
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct BridgeParams {
     /// Base64-encoded data (plaintext for encrypt, ciphertext for decrypt).
     #[serde(default)]
@@ -37,6 +44,41 @@ pub struct BridgeParams {
     /// Key label within the application namespace.
     #[serde(default)]
     pub key_label: String,
+
+    // --- WebAuthn / SK fields ---
+    //
+    // All optional; populated only by the `webauthn_*` methods.
+    // Skipped on serialize when `None` so non-SK requests stay on
+    // the existing wire shape.
+    /// FIDO2 Relying-Party identifier (e.g. `sshenc-<keyhash>.local`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rp_id: Option<String>,
+    /// Human-readable RP name surfaced in the Hello prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rp_name: Option<String>,
+    /// Per-user opaque ID (base64). Used at make-credential time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id_b64: Option<String>,
+    /// Username surfaced in the Hello prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    /// Display name surfaced in the Hello prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_display_name: Option<String>,
+    /// Credential identifier (base64). Required for
+    /// `webauthn_get_assertion` and `webauthn_delete_platform_credential`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id_b64: Option<String>,
+    /// Bytes that webauthn.dll hashes with SHA-256 and signs as the
+    /// `clientDataHash`. For SSH-SK signing this is the raw SSH
+    /// session-binding payload (we exploit the bytes-of-JSON
+    /// contract -- see `enclaveapp-windows-webauthn` for the
+    /// brittleness note). Base64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_data_b64: Option<String>,
+    /// Hello prompt timeout in milliseconds (default 60_000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u32>,
 }
 
 impl BridgeParams {
@@ -49,7 +91,8 @@ impl BridgeParams {
         self.access_policy
     }
 
-    /// Build a new `BridgeParams`.
+    /// Build a new `BridgeParams` for the legacy (TPM/CNG) methods.
+    /// The WebAuthn-side fields are left `None`.
     #[must_use]
     pub fn new(
         data: String,
@@ -62,8 +105,52 @@ impl BridgeParams {
             access_policy,
             app_name,
             key_label,
+            rp_id: None,
+            rp_name: None,
+            user_id_b64: None,
+            user_name: None,
+            user_display_name: None,
+            credential_id_b64: None,
+            client_data_b64: None,
+            timeout_ms: None,
         }
     }
+}
+
+/// JSON payload returned in `BridgeResponse::result` for a successful
+/// `webauthn_make_credential` call. Caller `serde_json::from_str`s
+/// the result string to recover the structure.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WebauthnMakeCredentialResult {
+    /// Base64 of the platform-authenticator credential identifier.
+    pub credential_id_b64: String,
+    /// Hex-encoded ECDSA P-256 public-key X coordinate (32 bytes).
+    pub public_key_x_hex: String,
+    /// Hex-encoded ECDSA P-256 public-key Y coordinate (32 bytes).
+    pub public_key_y_hex: String,
+    /// Base64 of the raw `authenticator_data` from the make-credential
+    /// response. Caller can use it for audit / debugging; not
+    /// required for downstream signing.
+    pub authenticator_data_b64: String,
+    /// Whether the platform authenticator made the credential
+    /// resident (Win11 26200+ forces resident regardless of the
+    /// `bRequireResidentKey` hint).
+    pub resident: bool,
+}
+
+/// JSON payload returned in `BridgeResponse::result` for a successful
+/// `webauthn_get_assertion` call.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WebauthnAssertionResult {
+    /// Base64 of the DER-encoded ECDSA signature (`SEQUENCE { INTEGER r, INTEGER s }`).
+    pub signature_der_b64: String,
+    /// Base64 of the `authenticator_data` blob (32-byte rpIdHash + flags + counter, possibly + extensions).
+    pub authenticator_data_b64: String,
+    /// `authenticator_data[32]`. Bit 0 = User Present, bit 2 = User Verified.
+    pub flags: u8,
+    /// Big-endian u32 from `authenticator_data[33..37]`. The TPM
+    /// increments this on every assertion.
+    pub counter: u32,
 }
 
 /// Bridge response from Windows server to WSL client.

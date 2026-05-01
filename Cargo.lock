@@ -497,6 +497,7 @@ dependencies = [
  "enclaveapp-bridge",
  "enclaveapp-core",
  "enclaveapp-windows",
+ "enclaveapp-windows-webauthn",
  "serde",
  "serde_json",
 ]

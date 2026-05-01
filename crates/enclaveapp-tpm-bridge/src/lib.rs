@@ -54,6 +54,26 @@ pub struct BridgeParamsCompat {
     /// Key label within the application namespace.
     #[serde(default)]
     pub key_label: String,
+
+    // --- WebAuthn / SK fields. See `enclaveapp_bridge::BridgeParams`
+    // for field-by-field semantics. Optional; non-SK methods leave
+    // them empty.
+    #[serde(default)]
+    pub rp_id: Option<String>,
+    #[serde(default)]
+    pub rp_name: Option<String>,
+    #[serde(default)]
+    pub user_id_b64: Option<String>,
+    #[serde(default)]
+    pub user_name: Option<String>,
+    #[serde(default)]
+    pub user_display_name: Option<String>,
+    #[serde(default)]
+    pub credential_id_b64: Option<String>,
+    #[serde(default)]
+    pub client_data_b64: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
 }
 
 impl BridgeParamsCompat {
@@ -225,8 +245,179 @@ pub fn handle_request(
             Ok(exists) => BridgeResponse::success(if exists { "true" } else { "false" }),
             Err(e) => BridgeResponse::error(&format!("signing_key_exists failed: {e}")),
         },
+        // WebAuthn / SK methods. WSL clients call these to get
+        // hardware-enforced Hello consent on the Windows host
+        // (where webauthn.dll lives). Non-Windows server builds
+        // refuse with a clear error -- those builds shouldn't be
+        // running these methods anyway since the bridge target
+        // platform is Windows.
+        "webauthn_is_available" => webauthn_is_available_handler(),
+        "webauthn_make_credential" => webauthn_make_credential_handler(&request.params),
+        "webauthn_get_assertion" => webauthn_get_assertion_handler(&request.params),
+        "webauthn_delete_platform_credential" => {
+            webauthn_delete_platform_credential_handler(&request.params)
+        }
         other => BridgeResponse::error(&format!("unknown method: {other}")),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn webauthn_is_available_handler() -> BridgeResponse {
+    if enclaveapp_windows_webauthn::is_platform_authenticator_available() {
+        BridgeResponse::success("true")
+    } else {
+        BridgeResponse::success("false")
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn webauthn_is_available_handler() -> BridgeResponse {
+    BridgeResponse::success("false")
+}
+
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_lines)] // tight serial flow, splitting hurts readability
+fn webauthn_make_credential_handler(params: &BridgeParamsCompat) -> BridgeResponse {
+    use enclaveapp_windows_webauthn::{make_credential, MakeCredentialParams};
+
+    let Some(rp_id) = params.rp_id.as_deref() else {
+        return BridgeResponse::error("webauthn_make_credential: missing rp_id");
+    };
+    let rp_name = params.rp_name.as_deref().unwrap_or("sshenc");
+    let Some(user_id_b64) = params.user_id_b64.as_deref() else {
+        return BridgeResponse::error("webauthn_make_credential: missing user_id_b64");
+    };
+    let user_id = match BASE64_STANDARD.decode(user_id_b64) {
+        Ok(v) => v,
+        Err(e) => return BridgeResponse::error(&format!("user_id_b64 decode: {e}")),
+    };
+    let user_name = params.user_name.as_deref().unwrap_or("");
+    let user_display_name = params.user_display_name.as_deref().unwrap_or(user_name);
+    let timeout_ms = params.timeout_ms.unwrap_or(60_000);
+
+    match make_credential(MakeCredentialParams {
+        rp_id,
+        rp_name,
+        user_id: &user_id,
+        user_name,
+        user_display_name,
+        timeout_ms,
+        // Bridge process has no console window; let the wrapper
+        // pick GetForegroundWindow / GetDesktopWindow. On a
+        // typical `wsl bash -c "sshenc keygen"` invocation the
+        // foreground window is the Windows terminal hosting WSL.
+        hwnd: None,
+    }) {
+        Ok(cred) => {
+            let payload = enclaveapp_bridge::WebauthnMakeCredentialResult {
+                credential_id_b64: BASE64_STANDARD.encode(&cred.credential_id),
+                public_key_x_hex: hex_lower(&cred.public_key_x),
+                public_key_y_hex: hex_lower(&cred.public_key_y),
+                authenticator_data_b64: BASE64_STANDARD.encode(&cred.authenticator_data),
+                resident: cred.resident,
+            };
+            match serde_json::to_string(&payload) {
+                Ok(s) => BridgeResponse::success(&s),
+                Err(e) => BridgeResponse::error(&format!("serialize make_credential result: {e}")),
+            }
+        }
+        Err(e) => BridgeResponse::error(&format!("webauthn_make_credential: {e}")),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn webauthn_make_credential_handler(_params: &BridgeParamsCompat) -> BridgeResponse {
+    BridgeResponse::error(
+        "webauthn_make_credential: webauthn.dll is only available on Windows; \
+         this bridge build can't service the request",
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn webauthn_get_assertion_handler(params: &BridgeParamsCompat) -> BridgeResponse {
+    use enclaveapp_windows_webauthn::{get_assertion, GetAssertionParams};
+
+    let Some(rp_id) = params.rp_id.as_deref() else {
+        return BridgeResponse::error("webauthn_get_assertion: missing rp_id");
+    };
+    let Some(credential_id_b64) = params.credential_id_b64.as_deref() else {
+        return BridgeResponse::error("webauthn_get_assertion: missing credential_id_b64");
+    };
+    let credential_id = match BASE64_STANDARD.decode(credential_id_b64) {
+        Ok(v) => v,
+        Err(e) => return BridgeResponse::error(&format!("credential_id_b64 decode: {e}")),
+    };
+    let Some(client_data_b64) = params.client_data_b64.as_deref() else {
+        return BridgeResponse::error("webauthn_get_assertion: missing client_data_b64");
+    };
+    let client_data = match BASE64_STANDARD.decode(client_data_b64) {
+        Ok(v) => v,
+        Err(e) => return BridgeResponse::error(&format!("client_data_b64 decode: {e}")),
+    };
+    let timeout_ms = params.timeout_ms.unwrap_or(60_000);
+
+    match get_assertion(GetAssertionParams {
+        rp_id,
+        credential_id: &credential_id,
+        client_data: &client_data,
+        timeout_ms,
+        hwnd: None,
+    }) {
+        Ok(asn) => {
+            let payload = enclaveapp_bridge::WebauthnAssertionResult {
+                signature_der_b64: BASE64_STANDARD.encode(&asn.signature_der),
+                authenticator_data_b64: BASE64_STANDARD.encode(&asn.authenticator_data),
+                flags: asn.flags,
+                counter: asn.counter,
+            };
+            match serde_json::to_string(&payload) {
+                Ok(s) => BridgeResponse::success(&s),
+                Err(e) => BridgeResponse::error(&format!("serialize assertion result: {e}")),
+            }
+        }
+        Err(e) => BridgeResponse::error(&format!("webauthn_get_assertion: {e}")),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn webauthn_get_assertion_handler(_params: &BridgeParamsCompat) -> BridgeResponse {
+    BridgeResponse::error(
+        "webauthn_get_assertion: webauthn.dll is only available on Windows; \
+         this bridge build can't service the request",
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn webauthn_delete_platform_credential_handler(params: &BridgeParamsCompat) -> BridgeResponse {
+    let Some(credential_id_b64) = params.credential_id_b64.as_deref() else {
+        return BridgeResponse::error(
+            "webauthn_delete_platform_credential: missing credential_id_b64",
+        );
+    };
+    let credential_id = match BASE64_STANDARD.decode(credential_id_b64) {
+        Ok(v) => v,
+        Err(e) => return BridgeResponse::error(&format!("credential_id_b64 decode: {e}")),
+    };
+    match enclaveapp_windows_webauthn::delete_platform_credential(&credential_id) {
+        Ok(()) => BridgeResponse::success("ok"),
+        Err(e) => BridgeResponse::error(&format!("webauthn_delete_platform_credential: {e}")),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn webauthn_delete_platform_credential_handler(_params: &BridgeParamsCompat) -> BridgeResponse {
+    BridgeResponse::error(
+        "webauthn_delete_platform_credential: webauthn.dll is only available on Windows",
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
 }
 
 /// A JSON-RPC bridge server that reads requests from stdin and writes
@@ -318,6 +509,7 @@ mod tests {
                 biometric: false,
                 app_name: TEST_APP_NAME.to_string(),
                 key_label: TEST_KEY_LABEL.to_string(),
+                ..BridgeParamsCompat::default()
             },
         }
     }

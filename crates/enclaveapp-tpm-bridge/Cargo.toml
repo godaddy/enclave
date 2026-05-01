@@ -19,3 +19,4 @@ base64 = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 enclaveapp-windows = { workspace = true, features = ["signing", "encryption"] }
+enclaveapp-windows-webauthn = { workspace = true }

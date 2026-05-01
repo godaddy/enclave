@@ -683,6 +683,116 @@ pub fn bridge_signing_key_exists(
     }
 }
 
+// ============================================================
+// WebAuthn / SK convenience wrappers
+// ============================================================
+//
+// These let WSL Linux callers route SK keygen / sign / delete /
+// availability through the Windows-side `webauthn.dll` via the
+// existing JSON-RPC bridge. Hello prompt fires on the Windows
+// desktop; the SSH key lives in WSL `~/.ssh`. Wire format is
+// identical to native-Windows SK signing -- the bridge only
+// shuttles the WebAuthn primitives.
+
+/// Probe the bridge for `WebAuthNIsUserVerifyingPlatformAuthenticatorAvailable`.
+/// Returns `Ok(true)` only when the Windows host's WebAuthn API
+/// reports an available platform authenticator (Hello enrolled).
+pub fn bridge_webauthn_is_available(bridge_path: &Path) -> Result<bool> {
+    let request = BridgeRequest {
+        method: "webauthn_is_available".to_string(),
+        params: BridgeParams::default(),
+    };
+    let response = call_bridge(bridge_path, &request)?;
+    let result = response.require_result("bridge_webauthn_is_available")?;
+    Ok(result == "true")
+}
+
+/// Make a TPM-bound credential through the Windows-side WebAuthn
+/// platform authenticator. Fires a Hello prompt on the Windows
+/// desktop. Returns the parsed `WebauthnMakeCredentialResult`
+/// (credential id + EC pubkey x/y + authenticator data).
+#[allow(clippy::too_many_arguments)]
+pub fn bridge_webauthn_make_credential(
+    bridge_path: &Path,
+    rp_id: &str,
+    rp_name: &str,
+    user_id: &[u8],
+    user_name: &str,
+    user_display_name: &str,
+    timeout_ms: u32,
+) -> Result<WebauthnMakeCredentialResult> {
+    let params = BridgeParams {
+        rp_id: Some(rp_id.to_string()),
+        rp_name: Some(rp_name.to_string()),
+        user_id_b64: Some(encode_data(user_id)),
+        user_name: Some(user_name.to_string()),
+        user_display_name: Some(user_display_name.to_string()),
+        timeout_ms: Some(timeout_ms),
+        ..BridgeParams::default()
+    };
+    let request = BridgeRequest {
+        method: "webauthn_make_credential".to_string(),
+        params,
+    };
+    let response = call_bridge(bridge_path, &request)?;
+    let result_json = response.require_result("bridge_webauthn_make_credential")?;
+    serde_json::from_str(result_json).map_err(|e| enclaveapp_core::Error::KeyOperation {
+        operation: "bridge_webauthn_make_credential".into(),
+        detail: format!("failed to parse make_credential result: {e}"),
+    })
+}
+
+/// Sign `client_data` through the Windows-side WebAuthn platform
+/// authenticator using a previously-made `credential_id`. Fires a
+/// Hello prompt on the Windows desktop. Returns the parsed
+/// `WebauthnAssertionResult` (DER signature + authenticator data
+/// + flags + counter).
+pub fn bridge_webauthn_get_assertion(
+    bridge_path: &Path,
+    rp_id: &str,
+    credential_id: &[u8],
+    client_data: &[u8],
+    timeout_ms: u32,
+) -> Result<WebauthnAssertionResult> {
+    let params = BridgeParams {
+        rp_id: Some(rp_id.to_string()),
+        credential_id_b64: Some(encode_data(credential_id)),
+        client_data_b64: Some(encode_data(client_data)),
+        timeout_ms: Some(timeout_ms),
+        ..BridgeParams::default()
+    };
+    let request = BridgeRequest {
+        method: "webauthn_get_assertion".to_string(),
+        params,
+    };
+    let response = call_bridge(bridge_path, &request)?;
+    let result_json = response.require_result("bridge_webauthn_get_assertion")?;
+    serde_json::from_str(result_json).map_err(|e| enclaveapp_core::Error::KeyOperation {
+        operation: "bridge_webauthn_get_assertion".into(),
+        detail: format!("failed to parse get_assertion result: {e}"),
+    })
+}
+
+/// Remove a previously-made platform credential from the user's
+/// Windows passkey list. Best-effort -- if the credential is
+/// already gone (user pruned via Settings > Passkeys), the
+/// underlying API returns an error we generally want to ignore.
+pub fn bridge_webauthn_delete_platform_credential(
+    bridge_path: &Path,
+    credential_id: &[u8],
+) -> Result<()> {
+    let params = BridgeParams {
+        credential_id_b64: Some(encode_data(credential_id)),
+        ..BridgeParams::default()
+    };
+    let request = BridgeRequest {
+        method: "webauthn_delete_platform_credential".to_string(),
+        params,
+    };
+    let response = call_bridge(bridge_path, &request)?;
+    response.require_ok("bridge_webauthn_delete_platform_credential")
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
