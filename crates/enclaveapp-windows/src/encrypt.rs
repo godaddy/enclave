@@ -203,46 +203,20 @@ impl EnclaveEncryptor for TpmEncryptor {
         let key_handle = key::open_key(&provider, &self.app_name, label)?;
 
         // Re-verify the key's NCRYPT_UI_POLICY matches metadata's
-        // AccessPolicy before decrypt. See the same check in
-        // TpmSigner::sign for the rationale — closes the
-        // pre-planted-key bypass on the encryption path too.
-        //
-        // When the `windows-hello-ui` feature is on we deliberately do
-        // NOT set `NCRYPT_UI_PROTECT_KEY_FLAG` on the key (see
-        // `key::create_key`) — the UI gate is the Rust-side Hello call
-        // below — so this verification would always fail. Skip it on
-        // that path; under flag-only (`default-features = false`) the
-        // pre-feature check is restored.
+        // AccessPolicy before decrypt. Catches an attacker-planted
+        // key that has the expected CNG name but a different (or
+        // missing) UI flag -- without this check the library might
+        // decrypt through a key that has no hardware-enforced UI
+        // gate. The TPM itself fires the CryptUI password dialog
+        // at the ECDH call below if the flag is set; we don't
+        // issue any user-mode prompts here.
         let dir = self.keys_dir();
         let expected_policy = match metadata::load_meta(&dir, label) {
             Ok(meta) => meta.access_policy,
             Err(Error::KeyNotFound { .. }) => AccessPolicy::None,
             Err(err) => return Err(err),
         };
-        #[cfg(not(feature = "windows-hello-ui"))]
         crate::ui_policy::verify_ui_policy_matches(&key_handle, expected_policy)?;
-
-        // Symmetric to the sign path: route the user-presence prompt
-        // through Windows Hello before the TPM ECDH operation. See
-        // `sign::sign` and `crate::hello` for the routing rationale,
-        // including the `NotAvailable` flag-check fallback so a
-        // Hello-minted key can't decrypt silently if Hello disappears.
-        #[cfg(feature = "windows-hello-ui")]
-        if expected_policy != AccessPolicy::None {
-            use crate::hello::{request_consent_for_policy, ConsentOutcome};
-            let prompt = format!("{}: decrypt with key '{label}'", self.app_name);
-            match request_consent_for_policy(expected_policy, &prompt)? {
-                ConsentOutcome::Verified => {}
-                ConsentOutcome::NotAvailable => {
-                    crate::ui_policy::verify_ui_policy_matches(&key_handle, expected_policy)?;
-                }
-                ConsentOutcome::Declined => {
-                    return Err(Error::DecryptFailed {
-                        detail: "user declined Windows Hello prompt for decrypt operation".into(),
-                    });
-                }
-            }
-        }
 
         unsafe { ecies_decrypt(&key_handle, ephemeral_pub, nonce, ct, tag) }
     }

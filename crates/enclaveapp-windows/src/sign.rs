@@ -161,50 +161,15 @@ impl EnclaveSigner for TpmSigner {
             Err(Error::KeyNotFound { .. }) => AccessPolicy::None,
             Err(err) => return Err(err),
         };
-        #[cfg(not(feature = "windows-hello-ui"))]
+        // Verify the on-disk metadata's access policy matches the
+        // TPM key's actual `NCRYPT_UI_POLICY` flag. Catches an
+        // attacker-planted key that has the expected CNG name but
+        // a different (or missing) UI flag -- without this check
+        // the agent might sign through a key that has no
+        // hardware-enforced UI gate. The hardware itself fires the
+        // CryptUI password dialog at the TPM call below if the
+        // flag is set; we don't issue any user-mode prompts here.
         crate::ui_policy::verify_ui_policy_matches(&key_handle, expected_policy)?;
-
-        // Route the user-presence prompt through Windows Hello before
-        // the TPM call. Behaviour:
-        //
-        // - `Verified`: user authenticated with Hello → proceed.
-        //
-        // - `Declined`: user actively cancelled / exhausted retries.
-        //   Refuse the signature regardless of which UI path the
-        //   key was minted under.
-        //
-        // - `NotAvailable`: Hello isn't configured right now. Two
-        //   sub-cases gated by the key's actual UI policy flag:
-        //
-        //   - Key has `NCRYPT_UI_PROTECT_KEY_FLAG` (created when
-        //     Hello wasn't available at keygen): proceed and let the
-        //     TPM-side CryptUI password protector fire. User sees a
-        //     password dialog. Worse UX than Hello but never silent
-        //     signing.
-        //
-        //   - Key has no flag (created when Hello *was* available):
-        //     refuse — Hello has been disabled / unenrolled since
-        //     keygen and signing without it would weaken the
-        //     user-presence guarantee the user opted into.
-        #[cfg(feature = "windows-hello-ui")]
-        if expected_policy != AccessPolicy::None {
-            use crate::hello::{request_consent_for_policy, ConsentOutcome};
-            let prompt = format!("{}: sign with key '{label}'", self.app_name);
-            match request_consent_for_policy(expected_policy, &prompt)? {
-                ConsentOutcome::Verified => {}
-                ConsentOutcome::NotAvailable => {
-                    // Verify the TPM key has its own UI gate; if not,
-                    // this key was minted in the Hello-only path and
-                    // we must refuse rather than sign silently.
-                    crate::ui_policy::verify_ui_policy_matches(&key_handle, expected_policy)?;
-                }
-                ConsentOutcome::Declined => {
-                    return Err(Error::SignFailed {
-                        detail: "user declined Windows Hello prompt for sign operation".into(),
-                    });
-                }
-            }
-        }
 
         // Pre-hash with SHA-256.
         let digest = Sha256::digest(data);

@@ -53,38 +53,25 @@ pub fn create_key(
     }
     let key = NcryptHandle(NCRYPT_HANDLE(key_handle.0));
 
-    // Decide whether to set `NCRYPT_UI_PROTECT_KEY_FLAG` on the key.
+    // Set `NCRYPT_UI_PROTECT_KEY_FLAG` whenever a non-None access
+    // policy is requested. The TPM enforces the UI gate per-sign:
+    // on Hello-enrolled hosts the OS surfaces the legacy CryptUI
+    // password protector dialog; on non-Hello hosts the same dialog.
+    // Either way, the gate is hardware-enforced -- the TPM will not
+    // release the key without the OS-mediated UI ack, and there is
+    // no user-mode Boolean an attacker can hook.
     //
-    // - `AccessPolicy::None`: never set, no prompt at any time.
-    //
-    // - With the `windows-hello-ui` feature on (default), probe
-    //   Hello at keygen time:
-    //
-    //   - Hello *is* enrolled (PIN / face / fingerprint usable):
-    //     skip the flag. The Rust-side `request_consent_for_policy`
-    //     in `sign` / `decrypt` will fire Hello at use time
-    //     deterministically, and we don't want the flag's CryptUI
-    //     password protector firing on top at `NCryptFinalizeKey`.
-    //     This is the ideal path: zero password dialogs, Hello
-    //     prompt only at use time.
-    //
-    //   - Hello *not* enrolled: keep the flag so the TPM still
-    //     gates use behind *some* UI — the legacy CryptUI password
-    //     prompt. Worse UX than Hello but never silent signing,
-    //     which the user explicitly preferred over no prompt at
-    //     all.
-    //
-    // - Without the feature (`default-features = false`): set the
-    //   flag whenever the policy demands presence. This preserves
-    //   the pre-feature implementation as an "ifdef" path.
+    // The previous design (pre-PR removing UserConsentVerifier) had
+    // a Hello-availability probe here that dropped the flag when
+    // Hello was enrolled, with a Rust-side `UserConsentVerifier`
+    // call in `sign` / `decrypt` providing the prompt instead.
+    // That gave a nicer Hello biometric UX but at the cost of a
+    // soft consent gate -- the `Verified` Boolean was checked in
+    // user-mode and hookable by an attacker with code execution as
+    // the user. Apps that want hardware-enforced Hello biometric
+    // UX use `enclaveapp-windows-webauthn` (TPM via NGC) instead.
     if policy != AccessPolicy::None {
-        #[cfg(feature = "windows-hello-ui")]
-        let hello_available = crate::hello::is_hello_available();
-        #[cfg(not(feature = "windows-hello-ui"))]
-        let hello_available = false;
-        if !hello_available {
-            set_ui_policy(&key, policy)?;
-        }
+        set_ui_policy(&key, policy)?;
     }
 
     // Persist the key to the TPM.
