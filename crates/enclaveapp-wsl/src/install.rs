@@ -397,11 +397,21 @@ fn install_linux_release(
     // itself can't fail us out.
     let bins = spec.binaries.join(" ");
     // Stop any running daemons first — `cp` against a running ELF
-    // returns ETXTBSY ("text file busy"). `pkill` returns 1 when no
-    // process matched, which is fine, so silence its exit and then
-    // re-engage `set -e` for the actual install steps.
+    // returns ETXTBSY ("text file busy"). Match by process name
+    // *only* (`pkill -x` exact, no `-f` cmdline-match): the script
+    // we hand to `bash -c` contains the binary names as substrings
+    // of its own argv, so `pkill -f sshenc-agent` would also kill
+    // this bash, which exits 15 and the install gets reported as a
+    // failure even when the binaries did install successfully.
+    // `pkill -x` matches `/proc/$pid/comm` which is the basename of
+    // the executable, never the cmdline arguments.
+    //
+    // `pkill` returns 1 when no process matched. That's fine —
+    // silence its exit code with `; ` separators (each step in the
+    // teardown is independent), then `set -e` only after we get
+    // into the install proper.
     let script = format!(
-        "pkill -f /usr/local/bin/sshenc-agent 2>/dev/null \
+        "pkill -x sshenc-agent 2>/dev/null \
          ; sleep 1 \
          ; rm -rf /tmp/sshenc-install-$$ \
          && mkdir -p /tmp/sshenc-install-$$ \
