@@ -245,12 +245,16 @@ impl AppSigningBackend {
             config.app_name
         );
 
-        // Verify the bridge is responsive by sending init_signing.
-        enclaveapp_bridge::bridge_init_signing(
+        // Verify the bridge is responsive without side effects. We
+        // can't use `bridge_init_signing` here -- it has load-or-create
+        // semantics on the server side, so probing with the configured
+        // key_label (defaults to "default") creates that key on the
+        // Windows TPM as a side effect of every WSL backend init.
+        // `bridge_signing_key_exists` was added for exactly this case.
+        enclaveapp_bridge::bridge_signing_key_exists(
             &bridge_path,
             &config.app_name,
             &config.key_label,
-            config.access_policy,
         )
         .map_err(|e| StorageError::KeyInitFailed(e.to_string()))?;
 
