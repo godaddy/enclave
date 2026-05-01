@@ -12,17 +12,53 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
 use std::time::Duration;
 
-/// Timeout for package manager installs (socat via apt/apk/dnf). Package
-/// downloads can legitimately take several minutes on slow networks, so
-/// allow a generous window but refuse to hang forever.
+/// Timeout for downloading a Linux release tarball from GitHub
+/// (used by [`LinuxReleaseSpec`]). Generous so a slow GitHub mirror
+/// doesn't kill the install, bounded so a wedged route doesn't
+/// hang it forever.
 #[cfg(target_os = "windows")]
 const WSL_DEP_INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Timeout for quick WSL shell commands (chmod, which, etc.).
+/// Timeout for quick WSL shell commands (chmod, which, ldd, etc.).
 #[cfg(target_os = "windows")]
 const WSL_QUICK_CMD_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub use crate::detect::decode_wsl_output;
+
+/// GitHub-release-driven Linux binary install spec.
+///
+/// When set on [`WslInstallConfig::auto_install_linux_release`], the
+/// installer probes each detected distro's libc (glibc → `_gnu`,
+/// musl → `_musl`), `curl`s the matching tarball from a GitHub
+/// release URL, and `tar`-extracts the listed binaries straight to
+/// `/usr/local/bin/`.
+///
+/// This replaces the old socat + npiperelay bridge-dependency install.
+/// Native `sshenc-agent` (or whichever app) running inside the distro
+/// supersedes the SSH-protocol-over-socat hack — the native agent
+/// handles SSH protocol locally and crosses the WSL/Windows boundary
+/// only for the JSON-RPC TPM bridge, which is a different
+/// (deterministic) transport.
+#[derive(Debug, Clone)]
+pub struct LinuxReleaseSpec {
+    /// GitHub repo in `owner/name` form, e.g. `"godaddy/sshenc"`.
+    pub repo: String,
+    /// Release tag to install, e.g. `"v0.6.36"`. Caller passes this
+    /// in rather than reading `CARGO_PKG_VERSION` so consumer apps
+    /// can pin to a known-good version on rollback if needed.
+    pub tag: String,
+    /// Tarball name for glibc-based distros, e.g.
+    /// `"sshenc-x86_64-unknown-linux-gnu.tar.gz"`. Resolved to
+    /// `https://github.com/{repo}/releases/download/{tag}/{asset_gnu}`.
+    pub asset_gnu: String,
+    /// Tarball name for musl-based distros, e.g.
+    /// `"sshenc-x86_64-unknown-linux-musl.tar.gz"`. Used when the
+    /// distro's `ldd --version` output doesn't mention "GNU".
+    pub asset_musl: String,
+    /// Binaries to install from the extracted tarball, e.g.
+    /// `["sshenc", "sshenc-agent", "sshenc-keygen", "gitenc"]`.
+    pub binaries: Vec<String>,
+}
 
 /// Configuration for WSL installation.
 #[derive(Debug, Clone)]
@@ -31,13 +67,15 @@ pub struct WslInstallConfig {
     pub app_name: String,
     /// Shell block content to inject (the script body, without markers).
     pub shell_block: String,
-    /// Whether to install socat + npiperelay bridge dependencies.
-    pub install_bridge_deps: bool,
     /// Optional: path to a Linux binary to copy into each distro.
     pub linux_binary_path: Option<PathBuf>,
     /// Target path for the Linux binary inside each distro
     /// (relative to home, e.g., `.local/bin/myapp`).
     pub linux_binary_target: Option<String>,
+    /// Optional: download a matching Linux release tarball from
+    /// GitHub at install time and extract the named binaries into
+    /// `/usr/local/bin/`. Replaces the old socat+npiperelay dance.
+    pub auto_install_linux_release: Option<LinuxReleaseSpec>,
 }
 
 /// Result of configuring or unconfiguring a single distro.
@@ -55,7 +93,11 @@ pub struct DistroResult {
 /// 1. Discovers the home directory via UNC path
 /// 2. Copies a Linux binary if configured
 /// 3. Injects the managed shell block into `.bashrc`/`.zshrc`
-/// 4. Installs bridge dependencies (socat + npiperelay) if configured
+/// 4. Downloads + extracts the matching Linux release tarball into
+///    `/usr/local/bin/` if `auto_install_linux_release` is set
+///    (replaces the old socat + npiperelay bridge dependency path —
+///    keeping a native agent inside the distro is the deterministic
+///    transport, the SSH-protocol-over-socat hack is gone).
 ///
 /// Returns one result per distro so the caller can report progress.
 pub fn configure_all_distros(config: &WslInstallConfig) -> Vec<DistroResult> {
@@ -147,10 +189,11 @@ fn configure_distro(distro: &WslDistro, config: &WslInstallConfig) -> Result<Vec
     let block_config = ShellBlockConfig::new(&config.app_name, &config.shell_block);
     inject_shell_configs(home_path, &block_config, &mut actions)?;
 
-    // Install bridge dependencies
+    // Install Linux release binaries from GitHub (replaces the old
+    // socat + npiperelay path).
     #[cfg(target_os = "windows")]
-    if config.install_bridge_deps {
-        install_bridge_deps(&distro.name, &mut actions)?;
+    if let Some(release) = config.auto_install_linux_release.as_ref() {
+        install_linux_release(&distro.name, release, &mut actions)?;
     }
 
     Ok(actions)
@@ -291,62 +334,102 @@ fn copy_linux_binary(
     Ok(())
 }
 
-/// Install bridge dependencies (socat + npiperelay) into a WSL distro.
+/// Detect whether the distro's libc is glibc (`Ok(true)`) or musl
+/// (`Ok(false)`). Done by running `ldd --version` inside the
+/// distro and checking the first line — glibc says "GNU libc",
+/// musl says "musl libc". Anything else (e.g., Alpine where `ldd`
+/// is part of busybox) defaults to musl since that's the only
+/// statically-linked tarball that's guaranteed to run there.
 #[cfg(target_os = "windows")]
-fn install_bridge_deps(distro_name: &str, actions: &mut Vec<String>) -> Result<(), String> {
-    // Check and install socat (bounded by WSL_DEP_INSTALL_TIMEOUT so apt/dnf
-    // can't hang indefinitely on a stalled mirror or kernel panic).
-    if !wsl_has_command(distro_name, "socat") {
-        let mut cmd = std::process::Command::new("wsl");
-        cmd.args([
-            "-d",
-            distro_name,
-            "--",
-            "bash",
-            "-c",
-            "sudo apt-get install -y socat 2>/dev/null \
-             || sudo apk add socat 2>/dev/null \
-             || sudo dnf install -y socat 2>/dev/null",
-        ]);
-        match enclaveapp_core::timeout::run_status_with_timeout(cmd, WSL_DEP_INSTALL_TIMEOUT) {
-            Ok(enclaveapp_core::timeout::TimeoutResult::Completed(s)) if s.success() => {
-                actions.push("Installed socat".to_string());
-            }
-            Ok(enclaveapp_core::timeout::TimeoutResult::TimedOut) => {
-                actions.push(format!(
-                    "Warning: socat install timed out after {}s",
-                    WSL_DEP_INSTALL_TIMEOUT.as_secs()
-                ));
-            }
-            _ => actions.push("Warning: could not install socat automatically".to_string()),
-        }
-    } else {
-        actions.push("socat already installed".to_string());
-    }
-
-    // Check and install npiperelay
-    if !wsl_has_command(distro_name, "npiperelay.exe") {
-        actions.push(
-            "npiperelay not installed automatically; install a pinned, verified release manually"
-                .to_string(),
-        );
-    } else {
-        actions.push("npiperelay already installed".to_string());
-    }
-
-    Ok(())
-}
-
-/// Check if a command exists in a WSL distro.
-#[cfg(target_os = "windows")]
-fn wsl_has_command(distro_name: &str, cmd: &str) -> bool {
+fn distro_is_glibc(distro_name: &str) -> bool {
     let mut wsl = std::process::Command::new("wsl");
-    wsl.args(["-d", distro_name, "--", "command", "-v", cmd]);
-    matches!(
-        enclaveapp_core::timeout::run_with_timeout(wsl, WSL_QUICK_CMD_TIMEOUT),
-        Ok(enclaveapp_core::timeout::TimeoutResult::Completed(o)) if o.status.success()
-    )
+    wsl.args(["-d", distro_name, "--", "ldd", "--version"]);
+    match enclaveapp_core::timeout::run_with_timeout(wsl, WSL_QUICK_CMD_TIMEOUT) {
+        Ok(enclaveapp_core::timeout::TimeoutResult::Completed(o)) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let combined = format!("{stdout}{stderr}");
+            // glibc's ldd prints to stdout and includes "GNU libc";
+            // musl's ldd writes a usage line to stderr that mentions
+            // "musl". Check both streams either way.
+            combined.contains("GNU libc") || combined.contains("Free Software Foundation")
+        }
+        _ => false, // ldd missing → assume musl (statically-linked tarball runs anywhere)
+    }
 }
+
+/// Download the matching Linux release tarball from GitHub and
+/// extract the listed binaries into `/usr/local/bin/` inside the
+/// distro. Done with `curl` and `tar`, both of which are present
+/// in WSL distros (and on Windows but we run them inside the
+/// distro so the artifacts go straight to the right filesystem
+/// without crossing the WSL/Windows boundary).
+#[cfg(target_os = "windows")]
+fn install_linux_release(
+    distro_name: &str,
+    spec: &LinuxReleaseSpec,
+    actions: &mut Vec<String>,
+) -> Result<(), String> {
+    let asset = if distro_is_glibc(distro_name) {
+        &spec.asset_gnu
+    } else {
+        &spec.asset_musl
+    };
+    let url = format!(
+        "https://github.com/{}/releases/download/{}/{}",
+        spec.repo, spec.tag, asset
+    );
+
+    // Clean tmp dir, curl tarball, untar, sudo cp listed binaries
+    // to /usr/local/bin, chmod +x. All in one bash invocation so the
+    // installer runs in a single subprocess per distro.
+    let bins = spec.binaries.join(" ");
+    let script = format!(
+        "set -e
+         tmp=$(mktemp -d)
+         trap 'rm -rf \"$tmp\"' EXIT
+         cd \"$tmp\"
+         curl -fsSL '{url}' -o release.tar.gz
+         tar xzf release.tar.gz
+         sudo cp {bins} /usr/local/bin/
+         for b in {bins}; do sudo chmod +x /usr/local/bin/\"$b\"; done"
+    );
+    let mut cmd = std::process::Command::new("wsl");
+    cmd.args(["-d", distro_name, "--", "bash", "-c", &script]);
+    match enclaveapp_core::timeout::run_status_with_timeout(cmd, WSL_DEP_INSTALL_TIMEOUT) {
+        Ok(enclaveapp_core::timeout::TimeoutResult::Completed(s)) if s.success() => {
+            actions.push(format!(
+                "Installed {} from {} {}",
+                spec.binaries.join(", "),
+                spec.repo,
+                spec.tag
+            ));
+            Ok(())
+        }
+        Ok(enclaveapp_core::timeout::TimeoutResult::TimedOut) => {
+            actions.push(format!(
+                "Warning: {} install timed out after {}s",
+                spec.repo,
+                WSL_DEP_INSTALL_TIMEOUT.as_secs()
+            ));
+            Ok(())
+        }
+        _ => {
+            actions.push(format!(
+                "Warning: could not install {} from {} (network? release missing?)",
+                spec.binaries.join(", "),
+                url
+            ));
+            Ok(())
+        }
+    }
+}
+
+// `wsl_has_command` was used by the old socat / npiperelay path and
+// is no longer needed — `install_linux_release` invokes `curl` + `tar`
+// (both ubiquitous in WSL distros) directly via a single bash script.
+// Removed rather than dead-coded so the per-distro setup path stays
+// transparent.
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, let_underscore_drop)]
@@ -482,7 +565,7 @@ mod tests {
         let config = WslInstallConfig {
             app_name: "testapp".to_string(),
             shell_block: "export Q=1".to_string(),
-            install_bridge_deps: false,
+            auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
         };
@@ -535,7 +618,7 @@ mod tests {
         let config = WslInstallConfig {
             app_name: "test".to_string(),
             shell_block: "# test".to_string(),
-            install_bridge_deps: false,
+            auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
         };
@@ -578,7 +661,7 @@ mod tests {
         let config = WslInstallConfig {
             app_name: "testapp".to_string(),
             shell_block: "export TEST=1".to_string(),
-            install_bridge_deps: false,
+            auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
         };
@@ -615,7 +698,7 @@ mod tests {
         let config = WslInstallConfig {
             app_name: "testapp".to_string(),
             shell_block: "export Q=1".to_string(),
-            install_bridge_deps: false,
+            auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
         };
