@@ -380,19 +380,38 @@ fn install_linux_release(
         spec.repo, spec.tag, asset
     );
 
-    // Clean tmp dir, curl tarball, untar, sudo cp listed binaries
-    // to /usr/local/bin, chmod +x. All in one bash invocation so the
-    // installer runs in a single subprocess per distro.
+    // Curl the tarball, untar into a fresh per-PID work dir, sudo
+    // cp listed binaries to /usr/local/bin, chmod +x. All in one
+    // bash invocation so the installer runs in a single subprocess
+    // per distro.
+    //
+    // Using a fixed `/tmp/sshenc-install-$$` rather than mktemp:
+    // mktemp under `wsl bash -c` was observed to silently land in
+    // `cd ""` on some distros (Ubuntu / Debian / Fedora /
+    // AlmaLinux), at which point `tar` extracted into `$HOME` and
+    // collided with existing files. The `$$` shell PID is
+    // sufficient namespace for a single-shot install command.
+    //
+    // `rm -rf` before `mkdir` so a previous failed run can't leave
+    // a dirty dir behind. `set -e` after the cleanup so the cleanup
+    // itself can't fail us out.
     let bins = spec.binaries.join(" ");
+    // Stop any running daemons first — `cp` against a running ELF
+    // returns ETXTBSY ("text file busy"). `pkill` returns 1 when no
+    // process matched, which is fine, so silence its exit and then
+    // re-engage `set -e` for the actual install steps.
     let script = format!(
-        "set -e
-         tmp=$(mktemp -d)
-         trap 'rm -rf \"$tmp\"' EXIT
-         cd \"$tmp\"
-         curl -fsSL '{url}' -o release.tar.gz
-         tar xzf release.tar.gz
-         sudo cp {bins} /usr/local/bin/
-         for b in {bins}; do sudo chmod +x /usr/local/bin/\"$b\"; done"
+        "pkill -f /usr/local/bin/sshenc-agent 2>/dev/null \
+         ; sleep 1 \
+         ; rm -rf /tmp/sshenc-install-$$ \
+         && mkdir -p /tmp/sshenc-install-$$ \
+         && cd /tmp/sshenc-install-$$ \
+         && set -e \
+         && trap 'rm -rf /tmp/sshenc-install-$$' EXIT \
+         && curl -fsSL '{url}' -o release.tar.gz \
+         && tar xzf release.tar.gz \
+         && sudo cp {bins} /usr/local/bin/ \
+         && for b in {bins}; do sudo chmod +x /usr/local/bin/\"$b\"; done"
     );
     let mut cmd = std::process::Command::new("wsl");
     cmd.args(["-d", distro_name, "--", "bash", "-c", &script]);
