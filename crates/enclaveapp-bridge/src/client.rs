@@ -615,10 +615,21 @@ pub fn bridge_public_key(
 }
 
 /// Convenience: list signing keys via the bridge.
+///
+/// Sends `list_keys` directly without the `init_signing` prelude that
+/// other helpers go through. This is deliberately *not* using
+/// `call_bridge_after_signing_init`: doing so would create a signing
+/// key with the configured `key_label` (defaults to `"default"`) as a
+/// side effect of every list call, which surfaced as the agent's
+/// identity-enumeration silently leaking a `default` key on every
+/// matrix run. The server-side `list_keys` handler is now standalone
+/// and enumerates by `app_name`, so the per-label `init_signing` is
+/// no longer needed (and was never semantically right for a list-all
+/// operation in the first place).
 pub fn bridge_list_keys(
     bridge_path: &Path,
     app_name: &str,
-    key_label: &str,
+    _key_label: &str,
     access_policy: AccessPolicy,
 ) -> Result<Vec<String>> {
     let request = BridgeRequest {
@@ -627,11 +638,10 @@ pub fn bridge_list_keys(
             String::new(),
             access_policy,
             app_name.to_string(),
-            key_label.to_string(),
+            String::new(),
         ),
     };
-    let response =
-        call_bridge_after_signing_init(bridge_path, app_name, key_label, access_policy, &request)?;
+    let response = call_bridge(bridge_path, &request)?;
     let result_str = response.require_result("bridge_list_keys")?;
     serde_json::from_str(result_str)
         .map_err(|e| enclaveapp_core::Error::Serialization(format!("list_keys JSON: {e}")))
@@ -1528,26 +1538,25 @@ esac
 
     #[cfg(unix)]
     #[test]
-    fn bridge_list_keys_initializes_before_requesting() {
+    fn bridge_list_keys_is_standalone() {
+        // Locks in the new contract: bridge_list_keys does NOT prefix
+        // the request with init_signing. The previous "initializes
+        // before requesting" behavior was the source of the agent's
+        // identity-enumeration silently creating a "default" signing
+        // key as a side effect of every list. Mock script reads
+        // exactly one line and replies with a list_keys-shaped result.
         let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
-        // Write response files to avoid shell quoting issues with embedded JSON.
         let dir = std::env::temp_dir().join("bridge-list-keys-test");
         fs::create_dir_all(&dir).unwrap();
-        let resp1 = dir.join("resp1.json");
-        let resp2 = dir.join("resp2.json");
-        fs::write(&resp1, "{\"result\":\"\",\"error\":null}\n").unwrap();
+        let resp = dir.join("resp.json");
         fs::write(
-            &resp2,
+            &resp,
             "{\"result\":\"[\\\"key1\\\",\\\"key2\\\"]\",\"error\":null}\n",
         )
         .unwrap();
         let script = temp_script(
             "list-keys.sh",
-            &format!(
-                "#!/bin/sh\nread init_line\ncat {}\nread request_line\ncat {}\n",
-                resp1.display(),
-                resp2.display()
-            ),
+            &format!("#!/bin/sh\nread request_line\ncat {}\n", resp.display()),
         );
         let keys = bridge_list_keys(&script, "sshenc", "default", AccessPolicy::None).unwrap();
         assert_eq!(keys, vec!["key1".to_string(), "key2".to_string()]);

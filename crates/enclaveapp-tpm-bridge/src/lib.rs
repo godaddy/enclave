@@ -218,10 +218,13 @@ pub fn handle_request(
             }
         }
         "list_keys" => {
-            let Some(ref s) = signing_storage else {
-                return BridgeResponse::error("signing not initialized: call init_signing first");
-            };
-            match s.list_keys() {
+            // Standalone: doesn't require prior init_signing. Otherwise
+            // the client side's call_bridge_after_signing_init would
+            // create a key with the configured key_label (defaults to
+            // "default") as a side effect of every list operation,
+            // which manifested as a "default" key leak in the agent's
+            // identity-enumeration path.
+            match TpmSigningStorage::list_keys_for_app(app_name) {
                 Ok(keys) => {
                     let json = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string());
                     BridgeResponse::success(&json)
@@ -1015,13 +1018,23 @@ mod tests {
 
     #[test]
     fn handle_list_keys_without_init_signing() {
+        // list_keys is now standalone (doesn't require prior init_signing).
+        // The previous behavior errored "signing not initialized" but that
+        // forced clients to call init_signing first, which created a key
+        // with the configured key_label as a side effect of every list.
+        // The handler now uses TpmSigningStorage::list_keys_for_app, which
+        // takes only app_name. On a non-Windows test build the underlying
+        // call returns "TPM signing bridge is only supported on Windows";
+        // either way it's NOT the "signing not initialized" sentinel.
         let req = make_request("list_keys", "", AccessPolicy::None);
         let mut signing_storage = None;
         let resp = handle_signing(&req, &mut signing_storage);
-        assert!(resp
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("signing not initialized")),);
+        if let Some(err) = &resp.error {
+            assert!(
+                !err.contains("signing not initialized"),
+                "list_keys should be standalone, not require init_signing: {err}"
+            );
+        }
     }
 
     #[test]

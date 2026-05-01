@@ -202,6 +202,19 @@ mod platform {
             self.signer.list_keys().map_err(|e| e.to_string())
         }
 
+        /// List signing keys for an app without requiring a per-label
+        /// `init_signing`. Unlike the instance method above, this is
+        /// the path the bridge server uses for `list_keys` so the
+        /// agent's identity-enumeration doesn't create a `default`
+        /// key as a side effect of the per-key init_signing prelude.
+        pub fn list_keys_for_app(app_name: &str) -> Result<Vec<String>, String> {
+            let signer = TpmSigner::new(app_name);
+            if !signer.is_available() {
+                return Err("TPM not available".to_string());
+            }
+            signer.list_keys().map_err(|e| e.to_string())
+        }
+
         pub fn delete(app_name: &str, key_label: &str) -> Result<(), String> {
             let signer = TpmSigner::new(app_name);
 
@@ -306,6 +319,10 @@ mod platform {
 
         #[allow(clippy::unused_self)]
         pub fn list_keys(&self) -> Result<Vec<String>, String> {
+            Err("TPM signing bridge is only supported on Windows".to_string())
+        }
+
+        pub fn list_keys_for_app(_app_name: &str) -> Result<Vec<String>, String> {
             Err("TPM signing bridge is only supported on Windows".to_string())
         }
 
