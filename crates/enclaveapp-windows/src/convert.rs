@@ -1,4 +1,4 @@
-// Copyright 2024 Jay Gowdy
+// Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
 //! Format conversion helpers: P1363 <-> DER signatures, ECCPUBLIC_BLOB parsing,

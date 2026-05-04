@@ -1,4 +1,4 @@
-// Copyright 2024 Jay Gowdy
+// Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
 //! `LinuxTpmSigner` -- ECDSA P-256 signing backend using Linux TPM 2.0.
