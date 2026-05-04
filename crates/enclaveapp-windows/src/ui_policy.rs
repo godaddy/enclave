@@ -114,48 +114,85 @@ pub fn verify_ui_policy_matches(
         .chain(std::iter::once(0))
         .collect();
 
-    let mut actual = NCRYPT_UI_POLICY {
-        dwVersion: 0,
-        dwFlags: 0,
-        pszCreationTitle: PCWSTR::null(),
-        pszFriendlyName: PCWSTR::null(),
-        pszDescription: PCWSTR::null(),
-    };
-    let mut actual_size: u32 = 0;
-    let buf = unsafe {
-        std::slice::from_raw_parts_mut(
-            &mut actual as *mut _ as *mut u8,
-            std::mem::size_of::<NCRYPT_UI_POLICY>(),
+    // Two-call pattern. CNG's serialized form for `NCRYPT_UI_POLICY`
+    // is the struct followed by the inline string contents that the
+    // three `LPCWSTR` fields point to (length is variable and can
+    // exceed `sizeof(NCRYPT_UI_POLICY)` even when the strings were
+    // null at SET time, because CNG normalizes them). Passing a
+    // fixed-size buffer fails with `NTE_BUFFER_TOO_SMALL (0x80090028)`
+    // — the symptom in sshenc#180. First query the required size
+    // with a null buffer, then allocate exactly that and read.
+    let mut required: u32 = 0;
+    let size_result = unsafe {
+        NCryptGetProperty(
+            NCRYPT_HANDLE(key_handle.as_key().0),
+            PCWSTR(prop_name.as_ptr()),
+            None,
+            &mut required,
+            OBJECT_SECURITY_INFORMATION(0),
         )
     };
 
+    if let Err(e) = size_result {
+        // SPC_E_NO_POLICY / NTE_NOT_FOUND surface as a missing policy
+        // — translate to "no flag set" so the comparison below treats
+        // it as AccessPolicy::None.
+        if expected == AccessPolicy::None {
+            return Ok(());
+        }
+        return Err(enclaveapp_core::Error::KeyOperation {
+            operation: "verify_ui_policy".into(),
+            detail: format!(
+                "NCryptGetProperty(UI Policy) size query for key with expected policy \
+                 {expected:?}: {e}",
+            ),
+        });
+    }
+
+    if (required as usize) < std::mem::size_of::<NCRYPT_UI_POLICY>() {
+        return Err(enclaveapp_core::Error::KeyOperation {
+            operation: "verify_ui_policy".into(),
+            detail: format!(
+                "NCryptGetProperty(UI Policy) reported a buffer size of {required} bytes, \
+                 smaller than sizeof(NCRYPT_UI_POLICY)={}",
+                std::mem::size_of::<NCRYPT_UI_POLICY>()
+            ),
+        });
+    }
+
+    let mut buf = vec![0_u8; required as usize];
+    let mut actual_size = required;
     let result = unsafe {
         NCryptGetProperty(
             NCRYPT_HANDLE(key_handle.as_key().0),
             PCWSTR(prop_name.as_ptr()),
-            Some(buf),
+            Some(&mut buf),
             &mut actual_size,
             OBJECT_SECURITY_INFORMATION(0),
         )
     };
 
-    let actual_flags: u32 = match result {
-        Ok(()) => actual.dwFlags,
-        Err(e) => {
-            // SPC_E_NO_POLICY / NTE_NOT_FOUND both surface as a missing
-            // policy — translate to "no flag set" so the comparison
-            // below treats it as AccessPolicy::None.
-            if expected == AccessPolicy::None {
-                return Ok(());
-            }
-            return Err(enclaveapp_core::Error::KeyOperation {
-                operation: "verify_ui_policy".into(),
-                detail: format!(
-                    "NCryptGetProperty(UI Policy) for key with expected policy {expected:?}: {e}",
-                ),
-            });
+    if let Err(e) = result {
+        if expected == AccessPolicy::None {
+            return Ok(());
         }
-    };
+        return Err(enclaveapp_core::Error::KeyOperation {
+            operation: "verify_ui_policy".into(),
+            detail: format!(
+                "NCryptGetProperty(UI Policy) for key with expected policy {expected:?}: {e}",
+            ),
+        });
+    }
+
+    // We only need `dwFlags`; ignore the trailing inline strings and
+    // their pointers, which point into the local buffer (not stable
+    // outside this scope).
+    //
+    // SAFETY: `buf` is at least `sizeof(NCRYPT_UI_POLICY)` bytes (we
+    // checked `required` above) and CNG just wrote a valid
+    // `NCRYPT_UI_POLICY` into the prefix. Reading a `u32`-sized
+    // `dwFlags` field from a properly-sized buffer is sound.
+    let actual_flags = unsafe { (*(buf.as_ptr() as *const NCRYPT_UI_POLICY)).dwFlags };
 
     let has_protect_flag =
         (actual_flags & NCRYPT_UI_PROTECT_KEY_FLAG) == NCRYPT_UI_PROTECT_KEY_FLAG;
@@ -173,4 +210,153 @@ pub fn verify_ui_policy_matches(
         operation: "verify_ui_policy".into(),
         detail,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! Integration tests against a real Microsoft Platform Crypto
+    //! Provider key. Each test creates a TPM-backed P-256 key with a
+    //! unique label, runs the verify, and deletes the key on the way
+    //! out — including on panic, via a drop guard.
+    //!
+    //! The whole module is `#[ignore]`'d because it requires:
+    //! - A real TPM 2.0 the user can write to.
+    //! - GitHub-hosted `windows-latest` runners don't expose one to
+    //!   user processes, so CI wouldn't pass these. They're meant for
+    //!   the developer's matrix-test laptop.
+    //!
+    //! Run with:
+    //! ```sh
+    //! cargo test -p enclaveapp-windows ui_policy -- --ignored
+    //! ```
+    //!
+    //! These cover the regression behind sshenc#180: a key created
+    //! with `AccessPolicy::Any` has its UI policy round-trip via
+    //! `verify_ui_policy_matches`. The pre-fix version failed with
+    //! `NTE_BUFFER_TOO_SMALL` because CNG returns the
+    //! `NCRYPT_UI_POLICY` struct followed by inline strings whose
+    //! total size exceeds the bare `sizeof(NCRYPT_UI_POLICY)`.
+    use super::*;
+    use crate::key::{create_key, delete_key};
+    use crate::provider::open_provider;
+
+    const TEST_APP: &str = "enclaveapp_test_ui_policy";
+    const ECDSA_P256: &str = "ECDSA_P256";
+
+    /// RAII guard that deletes a TPM key on drop, regardless of test
+    /// outcome. Every test that calls `create_key` must hold one of
+    /// these so a panicking assertion doesn't leave a stranded key in
+    /// the user's TPM-backed CNG store.
+    struct KeyGuard {
+        label: String,
+    }
+
+    impl Drop for KeyGuard {
+        fn drop(&mut self) {
+            // Best-effort delete; ignore errors so a failed cleanup
+            // doesn't shadow the real test failure. `let _ =` would
+            // trip the workspace's `let-underscore-drop` lint, so
+            // bind to a named ignore instead.
+            let _r = delete_key(TEST_APP, &self.label);
+        }
+    }
+
+    /// Generate a per-test label so parallel `cargo test` runs don't
+    /// collide on the same CNG key name.
+    fn unique_label(prefix: &str) -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{prefix}-{}-{nanos}", std::process::id())
+    }
+
+    #[test]
+    #[ignore = "requires a real TPM 2.0; run on the matrix-test laptop"]
+    fn verify_round_trips_for_presence_required_key() {
+        let provider = open_provider().expect("open_provider");
+        let label = unique_label("any");
+        let _guard = KeyGuard {
+            label: label.clone(),
+        };
+
+        let (_key, _pub_key) =
+            create_key(&provider, TEST_APP, &label, ECDSA_P256, AccessPolicy::Any)
+                .expect("create_key with AccessPolicy::Any");
+
+        let key = crate::key::open_key(&provider, TEST_APP, &label).expect("open_key");
+        verify_ui_policy_matches(&key, AccessPolicy::Any)
+            .expect("verify_ui_policy_matches(Any) on a presence-required key must succeed");
+    }
+
+    #[test]
+    #[ignore = "requires a real TPM 2.0; run on the matrix-test laptop"]
+    fn verify_round_trips_for_no_presence_key() {
+        let provider = open_provider().expect("open_provider");
+        let label = unique_label("none");
+        let _guard = KeyGuard {
+            label: label.clone(),
+        };
+
+        let (_key, _pub_key) =
+            create_key(&provider, TEST_APP, &label, ECDSA_P256, AccessPolicy::None)
+                .expect("create_key with AccessPolicy::None");
+
+        let key = crate::key::open_key(&provider, TEST_APP, &label).expect("open_key");
+        verify_ui_policy_matches(&key, AccessPolicy::None)
+            .expect("verify_ui_policy_matches(None) on a no-presence key must succeed");
+    }
+
+    #[test]
+    #[ignore = "requires a real TPM 2.0; run on the matrix-test laptop"]
+    fn verify_rejects_planted_key_missing_protect_flag() {
+        // Security-critical contract: if a key without
+        // NCRYPT_UI_PROTECT_KEY_FLAG is opened with metadata that
+        // claims a presence policy, the verify must fail. This is
+        // the sole defense against a same-user attacker who pre-
+        // plants a TPM key under the expected CNG name without the
+        // flag.
+        let provider = open_provider().expect("open_provider");
+        let label = unique_label("plant");
+        let _guard = KeyGuard {
+            label: label.clone(),
+        };
+
+        let (_key, _pub_key) =
+            create_key(&provider, TEST_APP, &label, ECDSA_P256, AccessPolicy::None)
+                .expect("create_key with AccessPolicy::None");
+
+        let key = crate::key::open_key(&provider, TEST_APP, &label).expect("open_key");
+        let err = verify_ui_policy_matches(&key, AccessPolicy::Any)
+            .expect_err("verify_ui_policy_matches(Any) against a None-policy key must fail");
+        assert!(
+            err.to_string()
+                .contains("missing NCRYPT_UI_PROTECT_KEY_FLAG"),
+            "error message should name the missing-flag mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a real TPM 2.0; run on the matrix-test laptop"]
+    fn verify_rejects_extra_protect_flag() {
+        let provider = open_provider().expect("open_provider");
+        let label = unique_label("extra");
+        let _guard = KeyGuard {
+            label: label.clone(),
+        };
+
+        let (_key, _pub_key) =
+            create_key(&provider, TEST_APP, &label, ECDSA_P256, AccessPolicy::Any)
+                .expect("create_key with AccessPolicy::Any");
+
+        let key = crate::key::open_key(&provider, TEST_APP, &label).expect("open_key");
+        let err = verify_ui_policy_matches(&key, AccessPolicy::None)
+            .expect_err("verify_ui_policy_matches(None) against an Any-policy key must fail");
+        assert!(
+            err.to_string()
+                .contains("NCRYPT_UI_PROTECT_KEY_FLAG set but metadata expects"),
+            "error message should name the extra-flag mismatch, got: {err}"
+        );
+    }
 }
