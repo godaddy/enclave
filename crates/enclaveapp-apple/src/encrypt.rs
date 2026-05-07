@@ -41,12 +41,12 @@ impl SecureEnclaveEncryptor {
         SecureEnclaveEncryptor { config }
     }
 
-    /// Load the Secure Enclave handle for encryption/decryption using
-    /// the same reusable `LAContext` registry as signing. This lets a
-    /// user-presence-protected wrapping-key item reuse the current
-    /// biometric authentication instead of prompting independently on
-    /// each app-storage decrypt.
-    fn load_handle(&self, label: &str) -> Result<Zeroizing<Vec<u8>>> {
+    /// Load the Secure Enclave handle using the same reusable
+    /// `LAContext` registry as signing. Returning the token with the
+    /// handle lets the caller pass that same authenticated context into
+    /// CryptoKit for the SE operation, so one prompt covers both the
+    /// wrapping-key load and the hardware decrypt.
+    fn load_handle(&self, label: &str) -> Result<(Zeroizing<Vec<u8>>, u64)> {
         let token = lacontext::acquire(
             &self.config.app_name,
             label,
@@ -54,7 +54,10 @@ impl SecureEnclaveEncryptor {
         )
         .map(|h| h.token())
         .unwrap_or(0);
-        keychain::load_handle_with_context(&self.config, label, token)
+        Ok((
+            keychain::load_handle_with_context(&self.config, label, token)?,
+            token,
+        ))
     }
 }
 
@@ -95,7 +98,7 @@ impl EnclaveEncryptor for SecureEnclaveEncryptor {
     #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
     fn encrypt(&self, label: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
         validate_label(label)?;
-        let data_rep = self.load_handle(label)?;
+        let (data_rep, _token) = self.load_handle(label)?;
 
         let output_capacity = plaintext.len() + ECIES_OVERHEAD;
         let mut ciphertext = vec![0_u8; output_capacity];
@@ -131,7 +134,7 @@ impl EnclaveEncryptor for SecureEnclaveEncryptor {
             });
         }
 
-        let data_rep = self.load_handle(label)?;
+        let (data_rep, token) = self.load_handle(label)?;
 
         let max_plaintext = ciphertext.len();
         let mut plaintext = vec![0_u8; max_plaintext];
@@ -145,6 +148,7 @@ impl EnclaveEncryptor for SecureEnclaveEncryptor {
                 ciphertext.len() as i32,
                 plaintext.as_mut_ptr(),
                 &mut plaintext_len,
+                token,
             )
         };
 

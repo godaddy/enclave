@@ -82,6 +82,7 @@ extern "C" {
         ciphertext_len: i32,
         plaintext_out: *mut u8,
         plaintext_len: *mut i32,
+        lacontext_token: u64,
     ) -> i32;
 
     // Keychain generic-password helpers (wrapping-key storage).

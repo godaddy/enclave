@@ -504,7 +504,8 @@ public func enclaveapp_se_decrypt(
     _ ciphertext: UnsafePointer<UInt8>,
     _ ciphertext_len: Int32,
     _ plaintext_out: UnsafeMutablePointer<UInt8>,
-    _ plaintext_len: UnsafeMutablePointer<Int32>
+    _ plaintext_len: UnsafeMutablePointer<Int32>,
+    _ lacontext_token: UInt64
 ) -> Int32 {
     do {
         let ctLen = Int(ciphertext_len)
@@ -534,7 +535,15 @@ public func enclaveapp_se_decrypt(
 
         // Load SE key and perform ECDH
         let keyData = Data(bytes: data_rep, count: Int(data_rep_len))
-        let seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: keyData)
+        let seKey: SecureEnclave.P256.KeyAgreement.PrivateKey
+        if let ctx = lacontextLookup(lacontext_token) {
+            seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(
+                dataRepresentation: keyData,
+                authenticationContext: ctx
+            )
+        } else {
+            seKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: keyData)
+        }
         let sharedSecret = try seKey.sharedSecretFromKeyAgreement(with: ephemeralPubKey)
 
         // Derive same symmetric key with ephemeral pubkey as sharedInfo
