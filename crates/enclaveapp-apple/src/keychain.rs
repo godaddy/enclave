@@ -399,76 +399,103 @@ fn ensure_meta_integrity(app_name: &str, label: &str, dir: &std::path::Path) -> 
         return Ok(());
     }
 
-    // Read-only lookup. We must NOT trigger a SecItemAdd here —
-    // creation belongs on the keygen path. Without this distinction
-    // a CI macOS runner's locked Keychain hangs the verify path
-    // forever waiting on an approval dialog (delete_key /
-    // load_handle tests would block on the implicit creation).
+    // Step 1: check for the per-key meta-tag in the keychain.
+    // Reading the tag is independent of the meta-HMAC key — if the
+    // tag is absent, that's `legacy_meta` regardless of whether the
+    // meta-HMAC key has been created yet. Order matters:
+    // previously this function checked meta-HMAC first and returned
+    // Ok-early on Ok(None), which silently fail-opened on installs
+    // that have pre-trust-anchor keys but have not yet keygen'd a
+    // post-anchor key (the meta-HMAC key is created at first
+    // keygen). Migrate-meta was unreachable.
+    let stored_tag = match crate::meta_tag::load(app_name, label) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            // No tag in keychain → legacy_meta. Skip ahead to the
+            // marker-aware error builder below by jumping into the
+            // `Legacy` arm of the match logic. We use a sentinel:
+            // since we don't have an hmac_key to call meta_tag::verify
+            // with, build the Legacy error directly here.
+            return legacy_meta_error(app_name, label);
+        }
+        Err(_) => {
+            // Keychain unreachable (FFI failure other than not-
+            // found). Fail-open; the wrapping-key load downstream
+            // will produce its own clearer error if the Keychain
+            // is truly locked.
+            return Ok(());
+        }
+    };
+
+    // Step 2: tag exists. Load the meta-HMAC key to compute the
+    // expected tag and compare. Read-only — must NOT trigger a
+    // SecItemAdd from the verify path (CI hang risk).
     let hmac_key = match crate::meta_hmac::load_existing(app_name) {
         Ok(Some(k)) => k,
-        // No meta-HMAC key yet (fresh install before any keygen) or
-        // Keychain unreachable. Fail-open: the wrapping-key load
-        // downstream will produce its own clearer error if the
-        // Keychain is truly locked, and on a fresh install
-        // verification is genuinely a no-op (no keys to verify
-        // against yet).
+        // Tag is present but the meta-HMAC key is not loadable. This
+        // is an inconsistent state: some other code wrote a tag
+        // without ever creating the HMAC key. Fail-open rather than
+        // brick access; the operator can investigate via the agent
+        // log.
         Ok(None) | Err(_) => return Ok(()),
     };
 
-    match crate::meta_tag::verify(app_name, label, dir, hmac_key.as_slice())? {
-        crate::meta_tag::VerifyOutcome::Match
-        | crate::meta_tag::VerifyOutcome::NoMeta
-        | crate::meta_tag::VerifyOutcome::KeychainUnavailable => Ok(()),
-        crate::meta_tag::VerifyOutcome::Tamper => Err(Error::KeyOperation {
-            operation: "meta_tag_verify".into(),
-            detail: format!(
-                "key '{label}': metadata integrity check failed. The on-disk meta \
-                 does not match the keychain-stored tag — meta may have been \
-                 tampered with. Refusing to proceed. Regenerate the key to restore \
-                 a known-good state."
-            ),
-        }),
-        crate::meta_tag::VerifyOutcome::Legacy => {
-            // Check whether `{app} migrate-meta` has already
-            // completed on this install. If yes, this is the
-            // strong-tamper-warning case (legitimate operation
-            // should not produce a missing tag after marker is
-            // set). If no, this is the one-time-cutover case.
-            // Treat any Keychain-failure on the marker check as
-            // "marker not set" (gentle variant) — we'd rather
-            // produce a recoverable message than a screaming one
-            // when the Keychain is genuinely flaky.
-            let marker_set = crate::meta_migration_marker::is_set(app_name).unwrap_or(false);
-            if marker_set {
-                Err(Error::KeyOperation {
-                    operation: "meta_tag_legacy_post_migration".into(),
-                    detail: format!(
-                        "key '{label}' has no integrity tag, but `{app_name} migrate-meta` \
-                         has already completed on this install. This is a strong tamper \
-                         signal — legitimate operation should not produce a missing tag \
-                         after the marker is set. Recommended: regenerate the affected \
-                         key with `{app_name} keygen`. Do NOT run migrate-meta again \
-                         unless you can independently explain why this key's tag is \
-                         missing (e.g., manual restore from a backup of an unrelated \
-                         machine), in which case pass \
-                         `--force-rerun-i-understand` to override."
-                    ),
-                })
-            } else {
-                Err(Error::KeyOperation {
-                    operation: "meta_tag_legacy".into(),
-                    detail: format!(
-                        "key '{label}' has no integrity tag. This is the one-time \
-                         migration required by upgrading to a build that introduces meta \
-                         integrity tags, and is not something future upgrades will repeat. \
-                         Before migrating, verify the key's current policy looks correct: \
-                         `{app_name} inspect {label}`. To migrate: `{app_name} \
-                         migrate-meta`."
-                    ),
-                })
-            }
-        }
+    // Step 3: recompute the expected tag and compare.
+    let meta_bytes = std::fs::read(&meta_path).map_err(|e| Error::KeyOperation {
+        operation: "meta_tag_verify".into(),
+        detail: format!("read {}: {e}", meta_path.display()),
+    })?;
+    let actual = metadata::compute_meta_hmac_bytes(hmac_key.as_slice(), &meta_bytes);
+    let mut diff: u8 = 0;
+    for i in 0..stored_tag.len() {
+        diff |= stored_tag[i] ^ actual[i];
     }
+    if diff == 0 {
+        return Ok(());
+    }
+    Err(Error::KeyOperation {
+        operation: "meta_tag_verify".into(),
+        detail: format!(
+            "key '{label}': metadata integrity check failed. The on-disk meta \
+             does not match the keychain-stored tag — meta may have been \
+             tampered with. Refusing to proceed. Regenerate the key to restore \
+             a known-good state."
+        ),
+    })
+}
+
+/// Build the `legacy_meta` / `meta_tag_legacy_post_migration` error
+/// for a key that has no keychain tag. Variant depends on whether
+/// the migrate-marker is set on this install.
+fn legacy_meta_error(app_name: &str, label: &str) -> Result<()> {
+    let marker_set = crate::meta_migration_marker::is_set(app_name).unwrap_or(false);
+    if marker_set {
+        return Err(Error::KeyOperation {
+            operation: "meta_tag_legacy_post_migration".into(),
+            detail: format!(
+                "key '{label}' has no integrity tag, but `{app_name} migrate-meta` \
+                 has already completed on this install. This is a strong tamper \
+                 signal — legitimate operation should not produce a missing tag \
+                 after the marker is set. Recommended: regenerate the affected \
+                 key with `{app_name} keygen`. Do NOT run migrate-meta again \
+                 unless you can independently explain why this key's tag is \
+                 missing (e.g., manual restore from a backup of an unrelated \
+                 machine), in which case pass \
+                 `--force-rerun-i-understand` to override."
+            ),
+        });
+    }
+    Err(Error::KeyOperation {
+        operation: "meta_tag_legacy".into(),
+        detail: format!(
+            "key '{label}' has no integrity tag. This is the one-time \
+             migration required by upgrading to a build that introduces meta \
+             integrity tags, and is not something future upgrades will repeat. \
+             Before migrating, verify the key's current policy looks correct: \
+             `{app_name} inspect {label}`. To migrate: `{app_name} \
+             migrate-meta`."
+        ),
+    })
 }
 
 /// Roll back a half-completed keygen *after* persist_saved_key_material
