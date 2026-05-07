@@ -332,94 +332,149 @@ Reference points to mirror:
 | Cross-platform helper | `enclaveapp_app_storage::platform::check_meta_integrity` (currently macOS-only branch) |
 | Agent RPCs | `SSH_AGENTC_SSHENC_MIGRATE_META`, `SSH_AGENTC_SSHENC_CHECK_MIGRATION_MARKER`, `SSH_AGENTC_SSHENC_SET_MIGRATION_MARKER` in `sshenc-agent-proto/src/message.rs` |
 
-### Track 1: Windows TPM (CNG)
+### Track 1: Windows TPM (CNG) — **DONE**
 
-**Crate:** `enclaveapp-windows`.
+**Crate:** `enclaveapp-windows`. Landed alongside this design doc;
+see the `windows-tpm-trust-anchor` branch on libenclaveapp and
+sshenc.
 
-- **Per-key tag storage.** Two viable mechanisms:
-  - `NCryptSetProperty` on the persisted CNG key handle with a
-    custom property name (e.g. `L"sshenc-meta-tag"`). Pro: tag
-    travels with the key; deleting the key cleans up the tag for
-    free. Con: NCrypt custom-property quirks across Windows
-    versions; need to test on 10 / 11 / Server 2022.
-  - Separate `<%APPDATA%\<app>\.meta-tags\<label>.dpapi>` file
-    per key, encrypted via `CryptProtectData(CRYPTPROTECT_UI_FORBIDDEN)`.
-    Pro: simpler to implement, mirrors the existing
-    `.meta-hmac.dpapi` pattern in `crates/enclaveapp-windows/src/meta_hmac.rs`.
-    Con: another file the user can delete (deletion primitive
-    risk applies — but DPAPI is bound to the user profile, so a
-    fresh write would fail without the right user context, which
-    helps).
-- **Recommended:** option 1 (`NCryptSetProperty`). Same trust
-  domain as the wrapping key.
-- **Migration marker:** another DPAPI blob at
-  `%APPDATA%\<app>\.migrate-marker.dpapi`. Cannot live in NCrypt
-  because no per-key handle exists at marker-set time.
-  Alternative: a single keyring-style entry via Windows Credential
-  Manager's `CredRead`/`CredWrite` for app-scoped credentials —
-  more aligned with the keychain pattern but more code. Pick
-  whichever is cheaper.
-- **Per-op verify:** add `ensure_meta_integrity` analogue to
-  `crates/enclaveapp-windows/src/sign.rs::TpmSigner::sign` (or a
-  new helper in `crates/enclaveapp-windows/src/keychain.rs` if
-  there is one) that fires before `NCryptSignHash`.
-- **Test environment:** must run on a real Windows host with a
-  TPM. Hyper-V / Parallels VMs with vTPM enabled should work.
-  Plain VMs without vTPM cannot exercise this.
-- **Existing CI matrix:** `Check / Test (Windows)` already runs
-  on `windows-latest` (currently `windows-2025`). Confirm whether
-  GitHub-hosted runners have vTPM (they do not, by default —
-  TPM-bound tests will need to be `#[ignore]`d on CI and run
-  via a local Windows VM or self-hosted runner).
+- **Per-key tag storage.** Per-key Credential Manager entry under
+  target name `com.godaddy.<app>.meta-tag.<label>`,
+  `CRED_TYPE_GENERIC`, `CRED_PERSIST_LOCAL_MACHINE`, accessed via
+  `enclaveapp-windows::meta_tag::{store, load, delete, rename, verify}`.
+  The first iteration tried `NCryptSetProperty(handle, L"sshenc-meta-tag", …)`
+  on the persisted Microsoft Platform Crypto Provider key — that
+  would have given "tag travels with the key, deleting the key
+  removes the tag for free" semantics. **Real-hardware testing on
+  Windows 11 + Hello-enrolled hosts shows the TPM-backed provider
+  rejects custom property names with `NTE_NOT_SUPPORTED (0x80090029)`**
+  for every payload shape tried; the provider only accepts a fixed
+  allowlist (`NCRYPT_UI_POLICY`, `NCRYPT_LENGTH_PROPERTY`, etc.).
+  Credential Manager is the porting doc's documented fallback and
+  the same trust domain as the wrapping key + meta-HMAC blob. A
+  `CredDeleteW` call by a same-UID attacker is observable as a
+  `Legacy` outcome on next op, and after `migrate-meta` runs once,
+  the marker switches the agent's error to the strong-tamper
+  variant — so the deletion primitive is observable, not silently
+  exploitable. `ERROR_NOT_FOUND (1168)` from `CredReadW` surfaces
+  as `VerifyOutcome::Legacy`. The DPAPI-file alternative (per-key
+  `<%APPDATA%\<app>\.meta-tags\<label>.dpapi>`) was rejected for
+  the same reason: it has no security advantage over Credential
+  Manager and requires implementing atomic-rename rollback for
+  per-key DPAPI blobs we'd otherwise get from
+  `CredWriteW`'s upsert semantics.
+- **Migration marker:** Windows Credential Manager target
+  `com.godaddy.<app>.migrate-marker` with `CRED_TYPE_GENERIC` /
+  `CRED_PERSIST_LOCAL_MACHINE`, accessed via
+  `enclaveapp-windows::meta_migration_marker::{is_set, set, clear}`.
+  Picked over a DPAPI blob for the same deletion-primitive reason.
+  The Cred Manager API is straightforward (CredReadW / CredWriteW /
+  CredDeleteW) and per-user binding is the threshold the threat
+  model wants.
+- **Per-op verify:** `enclaveapp-windows::sign::ensure_meta_integrity`
+  fires at the top of `TpmSigner::sign` before `NCryptSignHash`.
+  The verify path uses `meta_hmac::load_existing` (read-only — no
+  `CryptProtectData`) so a CI runner without an interactive
+  desktop never hangs on an implicit blob create. The `legacy_meta`
+  error has the same gentle / strong-tamper variants as macOS,
+  switched on the migration-marker presence.
+- **Cross-platform helper:**
+  `enclaveapp-app-storage::platform::check_meta_integrity` now has a
+  `#[cfg(target_os = "windows")]` branch that mirrors the macOS one
+  byte-for-byte: same `Match | NoMeta | KeychainUnavailable` →
+  proceed, `Tamper | Legacy` → refuse semantics.
+- **Keygen rollback.** `TpmSigner::generate` writes the meta-tag
+  after the on-disk material persists; on tag-write failure it rolls
+  back via `meta_tag::delete` → `metadata::delete_key_files` →
+  `key::delete_key`, mirroring the macOS `rollback_after_persist`
+  ordering.
+- **Sshenc agent.** `crates/sshenc-agent/src/server.rs` has
+  `#[cfg(target_os = "windows")]` arms for `MigrateMeta`,
+  `CheckMigrationMarker`, and `SetMigrationMarker`, calling into the
+  new `enclaveapp_windows::*` modules. `crates/sshenc-agent/Cargo.toml`
+  adds a Windows-only direct dep on `enclaveapp-windows` (mirrors the
+  macOS-only `enclaveapp-apple` dep) so the FFI-bearing call lives in
+  the agent rather than the CLI.
+- **Test environment:** real Windows host with TPM 2.0 required
+  (`Get-Tpm` reports `TpmPresent: True`, `TpmReady: True`).
+  Hyper-V / Parallels VMs with vTPM enabled work. The
+  `end_to_end_roundtrip` test in `meta_tag.rs` is `#[ignore]`d
+  because stock GitHub `windows-latest` runners do not expose a
+  vTPM. Self-hosted-runner-with-vTPM is the eventual fix; not in
+  scope here.
 
-### Track 2: Linux keyring (software)
+### Track 2: Linux keyring (software) — **DONE**
 
-**Crate:** `enclaveapp-keyring`.
+**Crate:** `enclaveapp-keyring`. Landed alongside Tracks 1 and the
+macOS reference; see the `windows-tpm-trust-anchor` branches.
 
-- **Per-key tag storage.** Two viable mechanisms:
-  - Kernel keyring via the `keyutils` crate. `add_key` /
-    `keyctl_read` with a per-key keyring entry under a
-    user-scoped session keyring. Trust domain: same as the
-    wrapping key (per-app keyring entry).
-  - File-backed: a sibling file `<keys_dir>/<label>.meta.tag`
-    at 0600. **Worse** than the keyring path because it's another
-    `rm`-able file — same deletion primitive issue the macOS PR
-    explicitly avoided. Avoid unless keyring is unavailable.
-- **Recommended:** kernel keyring with file fallback.
-- **Migration marker:** keyring entry under
-  `enclaveapp:sshenc:migrate-marker` or similar. Same access
-  semantics as the meta-HMAC key entry already in
-  `enclaveapp-keyring::meta_hmac_key`.
-- **Per-op verify:** wire into
-  `crates/enclaveapp-keyring/src/sign.rs::SoftwareSigner::sign`
-  before the actual ECDSA signature.
-- **Note:** the Linux keyring backend is software-only. The
-  trust anchor here protects against same-UID FS attackers but
-  does not provide hardware-rooted security. Worth being explicit
-  about that in the threat model entry — the meta-tag is an
-  integrity check, not a confidentiality boundary.
+- **Per-key tag storage.** Secret Service via the `keyring` crate
+  under service `<app_name>` / account `__meta_tag_<label>__`,
+  accessed via
+  `enclaveapp-keyring::meta_tag::{store, load, delete, rename, verify, stamp_from_disk}`.
+  Same Secret Service backend that already holds the per-app
+  meta-HMAC key (`__meta_hmac_key__`) and the per-key wrapping
+  KEK — same trust domain we already accept. Kernel keyring
+  (`keyutils`) was the alternative; we chose Secret Service
+  because it's the existing infra, sidesteps `keyutils`'s
+  per-session-by-default semantics, and avoids a parallel trust
+  boundary for no security upside.
+- **Migration marker:** Secret Service entry under service
+  `<app_name>` / account `__meta_migration_marker__`, accessed
+  via `enclaveapp-keyring::meta_migration_marker::{is_set, set, clear}`.
+- **Per-op verify:** `enclaveapp-keyring::sign::ensure_meta_integrity`
+  fires at the top of `SoftwareSigner::sign` before the ECDSA
+  signature. Read-only Secret Service fetch via
+  `meta_hmac_key_existing` so the verify path can never trigger
+  a `set_secret` write.
+- **Cross-platform helper:**
+  `enclaveapp-app-storage::platform::check_meta_integrity` now
+  has a `#[cfg(target_os = "linux")]` branch mirroring the macOS
+  and Windows ones byte-for-byte.
+- **Sshenc agent.** `crates/sshenc-agent/src/server.rs` has
+  `#[cfg(target_os = "linux")]` arms for `MigrateMeta`,
+  `CheckMigrationMarker`, and `SetMigrationMarker`, calling into
+  the new `enclaveapp_keyring::*` modules.
+  `crates/sshenc-agent/Cargo.toml` adds a Linux-only direct dep
+  on `enclaveapp-keyring` mirroring the macOS / Windows
+  arrangement.
+- **Linux specifics — note in threat model:** the keyring
+  backend doesn't enforce `AccessPolicy` at sign time, so the
+  meta-integrity tag is the ENTIRE defense against same-UID
+  rewriting of policy fields in `.meta` on this backend. macOS /
+  Windows have hardware-enforced policy bits at the chip layer;
+  Linux does not.
 
-### Track 3: Linux TPM (`enclaveapp-linux-tpm`)
+### Track 3: Linux TPM (`enclaveapp-linux-tpm`) — **DONE**
 
-**Caveat first:** the Linux TPM backend currently does **not**
-enforce `AccessPolicy` at sign time (per
-`libenclaveapp/THREAT_MODEL.md` § "Linux TPM backend"). Adding
-meta-tag protection on top of a backend that doesn't gate on
-policy is partial — the `AccessPolicy` field could be respected
-by the meta-tag check but ignored at the TPM layer. Decide whether
-to fix the policy-enforcement gap first or accept that meta-tag is
-"integrity for the displayed value, not enforcement for the
-hardware op" on Linux TPM.
+The Linux TPM backend doesn't enforce `AccessPolicy` at sign time
+either (per the design caveat that originally introduced this
+section), so meta-tag protection on top of it is "integrity for
+the displayed value, not enforcement for the hardware op" — same
+posture as the keyring backend.
 
-- **Per-key tag storage.** Sealed against the TPM's PCR-bound
-  policy via `Esys_PolicySecret` + `Esys_HashSequenceComplete`,
-  or a TPM-NV-RAM index. Heavy. Cheaper alternative: piggy-back
-  on the kernel keyring (Track 2) since the Linux TPM signer
-  already has a software side for ancillary state.
-- **Recommended:** kernel keyring (Track 2), shared mechanism
-  between software-keyring and TPM Linux backends.
-- **Per-op verify:** wire into
-  `crates/enclaveapp-linux-tpm/src/sign.rs::LinuxTpmSigner::sign`.
+- **Per-key tag storage / migration marker:** reuses Track 2's
+  `enclaveapp-keyring::meta_tag` and
+  `enclaveapp-keyring::meta_migration_marker` modules via direct
+  dep. Both Linux backends share the same Secret Service trust
+  domain, so no separate TPM-NV-RAM-sealed mechanism is needed.
+- **Per-op verify:** `enclaveapp-linux-tpm::sign::ensure_meta_integrity`
+  fires at the top of `LinuxTpmSigner::sign`, mirroring the
+  `SoftwareSigner` shape. Read-only meta-HMAC fetch via
+  `enclaveapp-keyring::meta_hmac_key_existing`.
+- **Keygen stamp:** `LinuxTpmSigner::generate` calls
+  `meta_tag::stamp_from_disk` after the existing meta-HMAC
+  sidecar write. Best-effort on Secret Service failure (fall
+  back to `migrate-meta`).
+- **Cross-platform helper:**
+  `enclaveapp-app-storage::platform::check_meta_integrity` Linux
+  branch covers both keyring and TPM backends with the same
+  Secret Service round-trip.
+
+The trust anchor is the **only** policy-field protection on
+Linux backends (neither enforces `AccessPolicy` at sign time
+hardware-side); macOS / Windows still have hardware-enforced
+policy bits as a second layer.
 
 ### Track 4: shell rc support beyond zsh/bash
 

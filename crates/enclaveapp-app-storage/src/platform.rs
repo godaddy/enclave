@@ -166,12 +166,14 @@ pub fn verify_meta_integrity(
 ///   legacy-meta state. Detail string contains the user-actionable
 ///   recovery path.
 ///
-/// **Platform coverage:** macOS only as of this PR. Windows and
-/// Linux do not yet have the per-key keychain-tag trust anchor
-/// implementation; the function is a no-op (`Ok(())`) there. The
-/// init-time `verify_meta_integrity` (sidecar-only) still applies
-/// to those platforms via the existing call sites in
-/// `enclaveapp-app-storage::signing` / `encryption`.
+/// **Platform coverage:** macOS, Windows, and Linux (Secret Service
+/// keyring backend). The Linux TPM backend (`enclaveapp-linux-tpm`)
+/// shares the keyring backend's Secret Service trust domain via
+/// direct dep, so it gets the same trust anchor coverage even
+/// though the Linux TPM doesn't enforce `AccessPolicy` at sign time
+/// — the trust anchor here functions as an integrity check, the
+/// only protection against same-UID `.meta` tamper on a backend
+/// without hardware policy bits.
 pub fn check_meta_integrity(
     app_name: &str,
     label: &str,
@@ -223,7 +225,83 @@ pub fn check_meta_integrity(
             }
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // Read-only — must NOT trigger `CryptProtectData` here.
+        // Creation belongs on the keygen path; the verify-side
+        // helper has to be safe to call from contexts where prompting
+        // for a DPAPI master-key materialization would hang (CI
+        // runners without an interactive desktop, locked sessions).
+        let hmac_key = match enclaveapp_windows::meta_hmac::load_existing(app_name) {
+            Ok(Some(k)) => k,
+            _ => return Ok(()),
+        };
+        let outcome =
+            enclaveapp_windows::meta_tag::verify(app_name, label, keys_dir, hmac_key.as_slice())
+                .map_err(|e| crate::error::StorageError::KeyInitFailed(e.to_string()))?;
+        match outcome {
+            enclaveapp_windows::meta_tag::VerifyOutcome::Match
+            | enclaveapp_windows::meta_tag::VerifyOutcome::NoMeta
+            | enclaveapp_windows::meta_tag::VerifyOutcome::KeychainUnavailable => Ok(()),
+            enclaveapp_windows::meta_tag::VerifyOutcome::Tamper => {
+                Err(crate::error::StorageError::KeyInitFailed(format!(
+                    "key '{label}': metadata integrity check failed. The on-disk meta does \
+                     not match the keychain-stored tag — meta may have been tampered with. \
+                     Refusing to proceed. Regenerate the key to restore a known-good state."
+                )))
+            }
+            enclaveapp_windows::meta_tag::VerifyOutcome::Legacy => {
+                Err(crate::error::StorageError::KeyInitFailed(format!(
+                    "key '{label}' has no integrity tag. This is a one-time migration \
+                     required by upgrading to a build that introduces meta integrity tags, \
+                     and is not something future upgrades will repeat. If you have already \
+                     run `{app_name} migrate-meta` on this machine, treat this as a tamper \
+                     signal — do not run it again. Regenerate the affected key instead. \
+                     Before migrating, verify the key's current policy looks correct: \
+                     `{app_name} inspect {label}`. To migrate: `{app_name} migrate-meta`."
+                )))
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Read-only — must NOT trigger a Secret Service write here.
+        // Creation belongs on the keygen path; the verify-side
+        // helper has to be safe to call from contexts where
+        // unlocking a locked keyring would prompt the user (or
+        // silently fail in a non-interactive session).
+        let hmac_key = match enclaveapp_keyring::meta_hmac_key_existing(app_name) {
+            Ok(Some(k)) => k,
+            _ => return Ok(()),
+        };
+        let outcome =
+            enclaveapp_keyring::meta_tag::verify(app_name, label, keys_dir, hmac_key.as_slice())
+                .map_err(|e| crate::error::StorageError::KeyInitFailed(e.to_string()))?;
+        match outcome {
+            enclaveapp_keyring::meta_tag::VerifyOutcome::Match
+            | enclaveapp_keyring::meta_tag::VerifyOutcome::NoMeta
+            | enclaveapp_keyring::meta_tag::VerifyOutcome::KeychainUnavailable => Ok(()),
+            enclaveapp_keyring::meta_tag::VerifyOutcome::Tamper => {
+                Err(crate::error::StorageError::KeyInitFailed(format!(
+                    "key '{label}': metadata integrity check failed. The on-disk meta does \
+                     not match the keychain-stored tag — meta may have been tampered with. \
+                     Refusing to proceed. Regenerate the key to restore a known-good state."
+                )))
+            }
+            enclaveapp_keyring::meta_tag::VerifyOutcome::Legacy => {
+                Err(crate::error::StorageError::KeyInitFailed(format!(
+                    "key '{label}' has no integrity tag. This is a one-time migration \
+                     required by upgrading to a build that introduces meta integrity tags, \
+                     and is not something future upgrades will repeat. If you have already \
+                     run `{app_name} migrate-meta` on this machine, treat this as a tamper \
+                     signal — do not run it again. Regenerate the affected key instead. \
+                     Before migrating, verify the key's current policy looks correct: \
+                     `{app_name} inspect {label}`. To migrate: `{app_name} migrate-meta`."
+                )))
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (app_name, label, keys_dir);
         Ok(())

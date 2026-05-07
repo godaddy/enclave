@@ -29,6 +29,11 @@ pub struct AppEncryptionStorage {
     app_name: String,
     key_label: String,
     access_policy: AccessPolicy,
+    /// Resolved keys directory (honors `StorageConfig::keys_dir`
+    /// override, otherwise `metadata::keys_dir(app_name)`). Stored
+    /// here so `decrypt`'s per-op `check_meta_integrity` reaches
+    /// the same `.meta` the platform encryptor wrote at keygen.
+    keys_dir: std::path::PathBuf,
     inner: StorageInner,
 }
 
@@ -135,6 +140,7 @@ impl AppEncryptionStorage {
             app_name: config.app_name.clone(),
             key_label: config.key_label.clone(),
             access_policy: config.access_policy,
+            keys_dir,
             inner: StorageInner::SecureEnclave(encryptor),
         })
     }
@@ -160,6 +166,7 @@ impl AppEncryptionStorage {
             app_name: config.app_name.clone(),
             key_label: config.key_label.clone(),
             access_policy: config.access_policy,
+            keys_dir,
             inner: StorageInner::Tpm(encryptor),
         })
     }
@@ -180,6 +187,7 @@ impl AppEncryptionStorage {
                 app_name: config.app_name.clone(),
                 key_label: config.key_label.clone(),
                 access_policy: config.access_policy,
+                keys_dir,
                 inner: StorageInner::LinuxTpm(encryptor),
             });
         }
@@ -221,6 +229,7 @@ impl AppEncryptionStorage {
             app_name: config.app_name.clone(),
             key_label: config.key_label.clone(),
             access_policy: config.access_policy,
+            keys_dir,
             inner: StorageInner::Software(encryptor),
         })
     }
@@ -249,6 +258,7 @@ impl AppEncryptionStorage {
             app_name: config.app_name.clone(),
             key_label: config.key_label.clone(),
             access_policy: config.access_policy,
+            keys_dir: Self::resolved_keys_dir(config),
             inner: StorageInner::WslBridge { bridge_path },
         })
     }
@@ -357,7 +367,80 @@ impl AppEncryptionStorage {
         encryptor
             .generate(&config.key_label, KeyType::Encryption, expected_policy)
             .map_err(|e| StorageError::KeyInitFailed(e.to_string()))?;
+
+        // Stamp the per-key trust-anchor tag against the meta the
+        // platform encryptor just wrote. The encryption side doesn't
+        // run through `SshencBackend`'s re-stamp path (encryption
+        // apps don't have a SshencBackend overlay), so the stamp
+        // happens once at this layer and covers the apps' single
+        // configured key. Best-effort on a meta-HMAC-key load
+        // failure; the next ensure_key cycle on app start will
+        // re-attempt and the user can recover via `<app> migrate-meta`
+        // if it never succeeds.
+        Self::stamp_trust_anchor(&config.app_name, &config.key_label, keys_dir);
         Ok(())
+    }
+
+    /// Stamp the per-key trust-anchor tag from the on-disk `.meta`.
+    /// Platform-dispatching: macOS Keychain, Windows Credential
+    /// Manager, Linux Secret Service. No-op on platforms without a
+    /// trust-anchor implementation (currently always one of those
+    /// three on supported targets).
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+        allow(unused_variables)
+    )]
+    fn stamp_trust_anchor(app_name: &str, label: &str, keys_dir: &std::path::Path) {
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(Some(hk)) = enclaveapp_apple::meta_hmac::load_existing(app_name) {
+                let meta_path = keys_dir.join(format!("{label}.meta"));
+                if let Ok(meta_bytes) = std::fs::read(&meta_path) {
+                    let tag = metadata::compute_meta_hmac_bytes(hk.as_slice(), &meta_bytes);
+                    if let Err(e) = enclaveapp_apple::meta_tag::store(app_name, label, &tag) {
+                        warn!(
+                            label = %label,
+                            error = %e,
+                            "encryption keygen meta-tag stamp failed"
+                        );
+                    }
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(Some(hk)) = enclaveapp_windows::meta_hmac::load_or_create(app_name) {
+                if let Err(e) = enclaveapp_windows::meta_tag::stamp_from_disk(
+                    app_name,
+                    label,
+                    keys_dir,
+                    hk.as_slice(),
+                ) {
+                    warn!(
+                        label = %label,
+                        error = %e,
+                        "encryption keygen meta-tag stamp failed"
+                    );
+                }
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(Some(hk)) = enclaveapp_keyring::meta_hmac_key_existing(app_name) {
+                if let Err(e) = enclaveapp_keyring::meta_tag::stamp_from_disk(
+                    app_name,
+                    label,
+                    keys_dir,
+                    hk.as_slice(),
+                ) {
+                    warn!(
+                        label = %label,
+                        error = %e,
+                        "encryption keygen meta-tag stamp failed"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -413,6 +496,17 @@ impl EncryptionStorage for AppEncryptionStorage {
     }
 
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        // Per-op trust-anchor check before invoking the platform
+        // encryptor. Symmetric with the signing side: a same-UID
+        // attacker who rewrites `.meta` between `ensure_key`
+        // (init-time sidecar verify) and a later `decrypt` is
+        // caught here. The init-time sidecar check is necessary
+        // (it gates whether the key file is even loaded) but not
+        // sufficient because long-lived processes don't re-init.
+        // `check_meta_integrity` is platform-dispatching and
+        // read-only.
+        crate::platform::check_meta_integrity(&self.app_name, &self.key_label, &self.keys_dir)?;
+
         match &self.inner {
             #[cfg(target_os = "macos")]
             StorageInner::SecureEnclave(enc) => enc

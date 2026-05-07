@@ -84,22 +84,51 @@ impl EnclaveKeyManager for TpmSigner {
             key::delete_key(&self.app_name, label)
         })?;
 
-        // Layer the HMAC sidecar on top of the persisted meta. Same
-        // best-effort posture as the macOS path: a DPAPI failure
-        // here doesn't fail keygen, the next strict-mode load will
-        // hit the migration path. Cached after first call.
-        if let Ok(Some(hmac_key)) = crate::meta_hmac::load_or_create(&self.app_name) {
+        // Layer the meta-integrity tag onto the CNG key. This is
+        // the trust anchor for `<label>.meta` going forward — the
+        // on-disk `<label>.meta.hmac` sidecar is a derivable cache,
+        // not the authority. See
+        // `docs/design-meta-hmac-trust-anchor.md`.
+        //
+        // Two failure modes (mirroring macOS keychain.rs):
+        //   - meta-HMAC key unavailable (DPAPI rare path): fail-open,
+        //     log a warning. Match pre-trust-anchor behavior; the
+        //     user can run migrate-meta once DPAPI recovers.
+        //   - meta-HMAC key available but the per-key tag write
+        //     fails: hard error, roll back the entire keygen so the
+        //     label is free to retry cleanly.
+        let hmac_key_opt = crate::meta_hmac::load_or_create(&self.app_name)
+            .ok()
+            .flatten();
+        if let Some(hk) = hmac_key_opt {
             let meta = KeyMeta::new(label, key_type, policy);
-            if let Err(e) =
-                metadata::save_meta_with_hmac(state.dir(), label, &meta, hmac_key.as_slice())
+            if let Err(e) = metadata::save_meta_with_hmac(state.dir(), label, &meta, hk.as_slice())
             {
-                tracing::warn!(
-                    label = label,
-                    error = %e,
-                    "post-persist meta-HMAC sidecar write failed; \
-                     will be picked up by the next load's auto-migrate"
-                );
+                rollback_after_persist(state.dir(), &self.app_name, label);
+                return Err(e);
             }
+            let meta_path = state.dir().join(format!("{label}.meta"));
+            let meta_bytes = match std::fs::read(&meta_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    rollback_after_persist(state.dir(), &self.app_name, label);
+                    return Err(Error::KeyOperation {
+                        operation: "post_persist_meta_read".into(),
+                        detail: format!("read {}: {e}", meta_path.display()),
+                    });
+                }
+            };
+            let tag = metadata::compute_meta_hmac_bytes(hk.as_slice(), &meta_bytes);
+            if let Err(e) = crate::meta_tag::store(&self.app_name, label, &tag) {
+                rollback_after_persist(state.dir(), &self.app_name, label);
+                return Err(e);
+            }
+        } else {
+            tracing::warn!(
+                label = label,
+                "meta-HMAC key unavailable at keygen; key persisted without integrity tag. \
+                 Run `<app> migrate-meta` once DPAPI is reachable."
+            );
         }
 
         Ok(pub_key)
@@ -153,11 +182,125 @@ impl EnclaveKeyManager for TpmSigner {
     }
 }
 
+/// Roll back a half-completed keygen *after* the on-disk material has
+/// been persisted, when a subsequent step (meta-HMAC sidecar or
+/// meta-tag store) failed. Each step is best-effort; we log warnings
+/// and continue so partial cleanup doesn't strand resources.
+///
+/// Order matters: clear the CNG meta-tag property first (cheap, no
+/// effect if already missing), remove on-disk artifacts, then delete
+/// the CNG key itself. Deleting the key would orphan the property
+/// anyway, but doing the property delete first avoids a tag that
+/// outlives a later-recreated key with the same label.
+fn rollback_after_persist(dir: &std::path::Path, app_name: &str, label: &str) {
+    if let Err(e) = crate::meta_tag::delete(app_name, label) {
+        tracing::warn!(label = label, error = %e, "rollback: meta_tag::delete failed");
+    }
+    match metadata::delete_key_files(dir, label) {
+        Ok(()) | Err(Error::KeyNotFound { .. }) => {}
+        Err(e) => tracing::warn!(label = label, error = %e, "rollback: file cleanup failed"),
+    }
+    if let Err(e) = key::delete_key(app_name, label) {
+        tracing::warn!(label = label, error = %e, "rollback: CNG key delete failed");
+    }
+}
+
+/// Run the per-op meta-integrity check against the CNG-stored tag.
+/// Returns `Ok(())` on a clean verify, on a missing meta file
+/// (`NoMeta` — caller's key-not-found flow handles it downstream),
+/// and on `KeychainUnavailable` (fail-open; the CNG load below will
+/// fail with its own clearer error if the provider is truly
+/// unreachable).
+///
+/// Returns `Err` on **tamper** (CNG tag exists but doesn't match the
+/// on-disk meta) and on **legacy** (no CNG tag — pre-migration key or
+/// attacker-induced state). Error messages mirror the macOS
+/// `keychain.rs::ensure_meta_integrity` wording so the user-facing UX
+/// is identical across platforms.
+fn ensure_meta_integrity(app_name: &str, label: &str, dir: &std::path::Path) -> Result<()> {
+    // CRITICAL: do not touch the platform secure store unless an
+    // on-disk `.meta` actually exists. Without this guard, every
+    // synthetic call site (tests, fresh-install probes) would call
+    // into `meta_hmac::load_existing` — which still touches DPAPI,
+    // even read-only, and on a stripped-down host without a usable
+    // user profile that surfaces as confusing noise.
+    let meta_path = dir.join(format!("{label}.meta"));
+    if !meta_path.exists() {
+        return Ok(());
+    }
+
+    // Read-only lookup. We must NOT trigger `CryptProtectData` here —
+    // creation belongs on the keygen path. Without this distinction
+    // a runner without an interactive user session can hang on the
+    // implicit DPAPI prompt.
+    let hmac_key = match crate::meta_hmac::load_existing(app_name) {
+        Ok(Some(k)) => k,
+        Ok(None) | Err(_) => return Ok(()),
+    };
+
+    match crate::meta_tag::verify(app_name, label, dir, hmac_key.as_slice())? {
+        crate::meta_tag::VerifyOutcome::Match
+        | crate::meta_tag::VerifyOutcome::NoMeta
+        | crate::meta_tag::VerifyOutcome::KeychainUnavailable => Ok(()),
+        crate::meta_tag::VerifyOutcome::Tamper => Err(Error::KeyOperation {
+            operation: "meta_tag_verify".into(),
+            detail: format!(
+                "key '{label}': metadata integrity check failed. The on-disk meta \
+                 does not match the keychain-stored tag — meta may have been \
+                 tampered with. Refusing to proceed. Regenerate the key to restore \
+                 a known-good state."
+            ),
+        }),
+        crate::meta_tag::VerifyOutcome::Legacy => {
+            // Strong-tamper variant when the migrate-meta marker is
+            // already set; gentle one-time-cutover variant otherwise.
+            // Treat any Credential-Manager failure on the marker
+            // check as "marker not set" so the gentle message wins on
+            // a flaky-store host.
+            let marker_set = crate::meta_migration_marker::is_set(app_name).unwrap_or(false);
+            if marker_set {
+                Err(Error::KeyOperation {
+                    operation: "meta_tag_legacy_post_migration".into(),
+                    detail: format!(
+                        "key '{label}' has no integrity tag, but `{app_name} migrate-meta` \
+                         has already completed on this install. This is a strong tamper \
+                         signal — legitimate operation should not produce a missing tag \
+                         after the marker is set. Recommended: regenerate the affected \
+                         key with `{app_name} keygen`. Do NOT run migrate-meta again \
+                         unless you can independently explain why this key's tag is \
+                         missing (e.g., manual restore from a backup of an unrelated \
+                         machine), in which case pass \
+                         `--force-rerun-i-understand` to override."
+                    ),
+                })
+            } else {
+                Err(Error::KeyOperation {
+                    operation: "meta_tag_legacy".into(),
+                    detail: format!(
+                        "key '{label}' has no integrity tag. This is the one-time \
+                         migration required by upgrading to a build that introduces meta \
+                         integrity tags, and is not something future upgrades will repeat. \
+                         Before migrating, verify the key's current policy looks correct: \
+                         `{app_name} inspect {label}`. To migrate: `{app_name} \
+                         migrate-meta`."
+                    ),
+                })
+            }
+        }
+    }
+}
+
 impl EnclaveSigner for TpmSigner {
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         validate_label(label)?;
         let provider = provider::open_provider()?;
         let key_handle = key::open_key(&provider, &self.app_name, label)?;
+
+        // Per-op trust-anchor check before any signing UI is
+        // surfaced. Refuses to proceed on a tamper / legacy state so
+        // the TPM is never asked to sign over policy-bearing meta
+        // that doesn't match what the user originally agreed to.
+        ensure_meta_integrity(&self.app_name, label, &self.keys_dir())?;
 
         // Re-verify the key's NCRYPT_UI_POLICY matches the metadata's
         // AccessPolicy before signing. Without this check, a same-user

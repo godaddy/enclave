@@ -103,7 +103,7 @@ pub fn load_or_create(app_name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         return Ok(Some(cached));
     }
     let path = blob_path(app_name);
-    if let Some(key) = load_existing(&path)? {
+    if let Some(key) = load_blob_at(&path)? {
         if key.len() == META_HMAC_KEY_LEN {
             let mut buf = [0_u8; META_HMAC_KEY_LEN];
             buf.copy_from_slice(&key);
@@ -122,12 +122,42 @@ pub fn load_or_create(app_name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
     Ok(Some(created))
 }
 
+/// Read-only companion to [`load_or_create`] — never calls
+/// `CryptProtectData`, so it is safe from contexts where DPAPI
+/// creation could surface a UI prompt or hang on a runner without an
+/// interactive desktop.
+///
+/// Returns `Ok(Some(key))` when the blob is present and decrypts;
+/// `Ok(None)` when the blob has not been created yet (no `Err`
+/// because that's the pre-keygen state and not actionable). Errors
+/// only on a confirmed DPAPI / IO failure that the operator should
+/// see — corrupt blob, profile change. The verify path treats `Err`
+/// as fail-open, so consumers should match the macOS pattern: map
+/// `Err` to "skip verification" rather than refusing to proceed.
+pub fn load_existing(app_name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    if let Some(cached) = cache_lookup(app_name) {
+        return Ok(Some(cached));
+    }
+    let path = blob_path(app_name);
+    let key = match load_blob_at(&path)? {
+        Some(k) => k,
+        None => return Ok(None),
+    };
+    if key.len() == META_HMAC_KEY_LEN {
+        let mut buf = [0_u8; META_HMAC_KEY_LEN];
+        buf.copy_from_slice(&key);
+        cache_insert(app_name, buf);
+        buf.zeroize();
+    }
+    Ok(Some(key))
+}
+
 /// Try to load and decrypt an existing blob. Returns `Ok(None)` if
 /// the file doesn't exist; surfaces other I/O errors. DPAPI failures
 /// (corrupt blob, profile change) are surfaced as `Err` so the
 /// operator sees them — silently regenerating would mask a real
 /// security event.
-fn load_existing(path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>> {
+fn load_blob_at(path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>> {
     let blob = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
