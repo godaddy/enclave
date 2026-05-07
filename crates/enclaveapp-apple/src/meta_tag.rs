@@ -340,17 +340,18 @@ mod tests {
         drop(std::fs::remove_dir_all(&dir));
     }
 
+    /// Ignored: this exercises the real FFI keychain path because
+    /// `verify()` calls `load()` unconditionally when the meta file
+    /// exists. CI macOS runners typically have a locked / no-user-
+    /// session keychain that HANGS the SecItem lookup waiting for a
+    /// dialog nobody can dismiss — same reason every other real-
+    /// keychain test in this crate (`meta_hmac::*` roundtrip,
+    /// `keychain_wrap::*` cross-binary tests) is also ignored.
+    /// Run locally on a logged-in macOS dev machine to verify the
+    /// `Legacy` outcome.
     #[test]
+    #[ignore = "hits the real macOS Keychain; run locally"]
     fn verify_legacy_when_meta_present_but_no_keychain_tag() {
-        // Use a unique app name guaranteed never to have had a tag
-        // stored. The Keychain-not-found path must surface as
-        // VerifyOutcome::Legacy (caller's recovery: run migrate-meta).
-        // This test depends on the legacy Keychain returning either
-        // SE_ERR_KEYCHAIN_NOT_FOUND or being unreachable — both are
-        // acceptable outcomes here. We accept Legacy or
-        // KeychainUnavailable so the test is portable across CI
-        // (where the Keychain is locked) and dev macOS (where it
-        // succeeds with a not-found).
         let dir = std::env::temp_dir().join(format!(
             "meta-tag-test-{}-{}",
             std::process::id(),
