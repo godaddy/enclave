@@ -188,7 +188,11 @@ pub fn check_meta_integrity(
     }
     #[cfg(target_os = "macos")]
     {
-        let hmac_key = match enclaveapp_apple::meta_hmac::load_or_create(app_name) {
+        // Read-only — must NOT trigger a SecItemAdd here. Creation
+        // belongs on the keygen path; the verify-side helper has
+        // to be safe to call from contexts where prompting for a
+        // Keychain ACL would hang (CI runners, locked sessions).
+        let hmac_key = match enclaveapp_apple::meta_hmac::load_existing(app_name) {
             Ok(Some(k)) => k,
             _ => return Ok(()),
         };

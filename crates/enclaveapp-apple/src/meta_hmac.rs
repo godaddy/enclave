@@ -85,6 +85,34 @@ fn service_name_for(app_name: &str) -> String {
     format!("com.godaddy.{app_name}.meta-hmac")
 }
 
+/// Load the per-app meta-HMAC key from the legacy macOS Keychain
+/// **without creating a fresh one if it's missing**. Returns
+/// `Ok(Some(key))` if a key already exists, `Ok(None)` if the
+/// Keychain has no entry yet (or is unreachable).
+///
+/// This is the verify-path entry point. Distinct from
+/// [`load_or_create`] because the verify path must NEVER trigger a
+/// `SecItemAdd` on a CI runner whose Keychain is locked — that
+/// blocks waiting for an approval dialog nobody can dismiss and
+/// hangs `cargo test`. Creation only happens on the keygen path
+/// (which is guaranteed to be a deliberate user-initiated action,
+/// not a side effect of running tests).
+pub fn load_existing(app_name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    if let Some(cached) = cache_lookup(app_name) {
+        return Ok(Some(cached));
+    }
+    if let Some(existing) = load(app_name)? {
+        if existing.len() == META_HMAC_KEY_LEN {
+            let mut buf = [0_u8; META_HMAC_KEY_LEN];
+            buf.copy_from_slice(&existing);
+            cache_insert(app_name, buf);
+            buf.zeroize();
+        }
+        return Ok(Some(existing));
+    }
+    Ok(None)
+}
+
 /// Load the per-app meta-HMAC key from the legacy macOS Keychain,
 /// generating and persisting one on first call.
 ///

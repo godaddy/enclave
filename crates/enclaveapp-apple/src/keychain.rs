@@ -399,11 +399,19 @@ fn ensure_meta_integrity(app_name: &str, label: &str, dir: &std::path::Path) -> 
         return Ok(());
     }
 
-    let hmac_key = match crate::meta_hmac::load_or_create(app_name) {
+    // Read-only lookup. We must NOT trigger a SecItemAdd here —
+    // creation belongs on the keygen path. Without this distinction
+    // a CI macOS runner's locked Keychain hangs the verify path
+    // forever waiting on an approval dialog (delete_key /
+    // load_handle tests would block on the implicit creation).
+    let hmac_key = match crate::meta_hmac::load_existing(app_name) {
         Ok(Some(k)) => k,
-        // Keychain unreachable. Fail-open here; the wrapping-key
-        // load downstream will produce its own clearer error if
-        // the Keychain is truly locked.
+        // No meta-HMAC key yet (fresh install before any keygen) or
+        // Keychain unreachable. Fail-open: the wrapping-key load
+        // downstream will produce its own clearer error if the
+        // Keychain is truly locked, and on a fresh install
+        // verification is genuinely a no-op (no keys to verify
+        // against yet).
         Ok(None) | Err(_) => return Ok(()),
     };
 
