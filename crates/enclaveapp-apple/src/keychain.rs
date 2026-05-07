@@ -420,19 +420,46 @@ fn ensure_meta_integrity(app_name: &str, label: &str, dir: &std::path::Path) -> 
                  a known-good state."
             ),
         }),
-        crate::meta_tag::VerifyOutcome::Legacy => Err(Error::KeyOperation {
-            operation: "meta_tag_legacy".into(),
-            detail: format!(
-                "key '{label}' has no integrity tag. This is a one-time migration \
-                 required by upgrading to a build that introduces meta integrity \
-                 tags, and is not something future upgrades will repeat. If you \
-                 have already run `{app_name} migrate-meta` on this machine, treat \
-                 this as a tamper signal — do not run it again. Regenerate the \
-                 affected key instead. Before migrating, verify the key's current \
-                 policy looks correct: `{app_name} inspect {label}`. To migrate: \
-                 `{app_name} migrate-meta`."
-            ),
-        }),
+        crate::meta_tag::VerifyOutcome::Legacy => {
+            // Check whether `{app} migrate-meta` has already
+            // completed on this install. If yes, this is the
+            // strong-tamper-warning case (legitimate operation
+            // should not produce a missing tag after marker is
+            // set). If no, this is the one-time-cutover case.
+            // Treat any Keychain-failure on the marker check as
+            // "marker not set" (gentle variant) — we'd rather
+            // produce a recoverable message than a screaming one
+            // when the Keychain is genuinely flaky.
+            let marker_set = crate::meta_migration_marker::is_set(app_name).unwrap_or(false);
+            if marker_set {
+                Err(Error::KeyOperation {
+                    operation: "meta_tag_legacy_post_migration".into(),
+                    detail: format!(
+                        "key '{label}' has no integrity tag, but `{app_name} migrate-meta` \
+                         has already completed on this install. This is a strong tamper \
+                         signal — legitimate operation should not produce a missing tag \
+                         after the marker is set. Recommended: regenerate the affected \
+                         key with `{app_name} keygen`. Do NOT run migrate-meta again \
+                         unless you can independently explain why this key's tag is \
+                         missing (e.g., manual restore from a backup of an unrelated \
+                         machine), in which case pass \
+                         `--force-rerun-i-understand` to override."
+                    ),
+                })
+            } else {
+                Err(Error::KeyOperation {
+                    operation: "meta_tag_legacy".into(),
+                    detail: format!(
+                        "key '{label}' has no integrity tag. This is the one-time \
+                         migration required by upgrading to a build that introduces meta \
+                         integrity tags, and is not something future upgrades will repeat. \
+                         Before migrating, verify the key's current policy looks correct: \
+                         `{app_name} inspect {label}`. To migrate: `{app_name} \
+                         migrate-meta`."
+                    ),
+                })
+            }
+        }
     }
 }
 

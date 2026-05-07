@@ -20,6 +20,8 @@ mod lacontext;
 #[cfg(target_os = "macos")]
 pub mod meta_hmac;
 #[cfg(target_os = "macos")]
+pub mod meta_migration_marker;
+#[cfg(target_os = "macos")]
 pub mod meta_tag;
 
 #[cfg(all(target_os = "macos", feature = "encryption"))]
