@@ -127,9 +127,10 @@ extern "C" {
     // `lacontext_token`: when non-zero, the bridge passes the registered
     // LAContext via `kSecUseAuthenticationContext`. If that LAContext
     // has a recent successful `evaluatePolicy` (which is what the
-    // sshenc agent's sign path arranges) the keychain reuses that auth
-    // for `userPresence`-protected items, suppressing the per-call
-    // biometric prompt. Token `0` is "no context, prompt independently."
+    // app's agent/helper sign or decrypt path arranges), the keychain
+    // reuses that auth for `userPresence`-protected items, suppressing
+    // the per-call biometric prompt. Token `0` is "no context, prompt
+    // independently."
     pub fn enclaveapp_keychain_load(
         service: *const u8,
         service_len: i32,
