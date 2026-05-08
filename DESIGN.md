@@ -89,7 +89,9 @@ Beyond the backends, a handful of crates provide cross-consumer utilities:
 
 ### Process hardening
 
-`enclaveapp_core::process::harden_process()` is called as the first line of every enclave app binary's `main()`. It applies, best-effort (failures warn but don't abort):
+`enclaveapp_core::process::harden_process()` **must be called as the first line of every enclave app binary's `main()`** — before argument parsing, before any environment inspection, before any decrypt. This is non-optional for any binary that consumes `libenclaveapp`. By definition, a libenclaveapp consumer holds hardware-backed secret material in process memory; the protections have to be in place before that material can land. See the [consuming-app integration checklist](CLAUDE.md#consuming-app-integration-checklist) in `CLAUDE.md` for the full set of expectations on consumers.
+
+`harden_process()` applies, best-effort (failures warn but don't abort):
 
 - `setrlimit(RLIMIT_CORE, 0)` on all Unix — no core dumps that could capture secret buffers.
 - `prctl(PR_SET_DUMPABLE, 0)` on Linux — `/proc/<pid>/mem` becomes root-only, `ptrace` attach from same-UID peers is denied.

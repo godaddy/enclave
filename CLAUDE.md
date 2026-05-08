@@ -65,11 +65,56 @@ Rust workspace under `crates/`:
 
 ### Process Hardening
 
-All enclave app binaries should call `enclaveapp_core::process::harden_process()` as the first line of `main()`. This disables core dumps to prevent secrets from appearing in crash dumps.
+Any binary that consumes `libenclaveapp` is by definition handling
+hardware-backed secret material. **All such binaries MUST call
+`enclaveapp_core::process::harden_process()` as the first line of
+`main()`** — before any argument parsing, before any environment
+inspection, before any decrypt. This is non-optional. Secret material is
+present in your process memory the moment you load it; the protections
+have to be in place first or they don't apply.
 
-For secret memory:
-- `enclaveapp_core::process::mlock_buffer()` locks memory pages to prevent paging to swap (the launcher does this automatically for env_overrides)
-- Credential strings should be zeroized after use via the `zeroize` crate
+`harden_process()` applies, best-effort, the platform-appropriate
+mitigations:
+
+- **All Unix:** `setrlimit(RLIMIT_CORE, 0)` — no core dumps.
+- **Linux:** `prctl(PR_SET_DUMPABLE, 0)` — `/proc/<pid>/mem` becomes
+  root-only, `ptrace` attach from non-root same-UID peers is denied.
+- **Linux:** `prctl(PR_SET_NO_NEW_PRIVS, 1)` — subsequent `exec*` cannot
+  gain setuid / file-capabilities privileges.
+- **Windows:** strict handle checks, extension-point disable, image-load
+  restrictions (no remote or low-mandatory-label DLLs).
+
+For secret memory beyond this baseline:
+
+- `enclaveapp_core::process::mlock_buffer()` / `munlock_buffer()` lock
+  pages to prevent swap-out. The launcher does this automatically for
+  env_overrides; consuming apps should `mlock` any other buffers
+  containing live plaintext key material.
+- Credential strings should be wrapped in `zeroize::Zeroizing<…>` or
+  scrubbed via `Zeroize::zeroize()` when their lifetime ends. In-memory
+  caches that are replaced on a TTL boundary should `zeroize` the
+  previous value before dropping it.
+
+### Consuming-app integration checklist
+
+When a new consuming app is added (or an existing app is reviewed), confirm:
+
+- [ ] `harden_process()` is the first line of `main()` for every binary
+      the app ships (CLI, agent, bridge — all of them).
+- [ ] Live plaintext credential buffers in the app's own memory are
+      either short-lived stack values or are wrapped to `zeroize` on
+      drop / on cache replacement.
+- [ ] No code path writes plaintext credentials to disk under the
+      app's control. Tests use `ENCLAVEAPP_MOCK_STORAGE` (gated behind
+      the `mock` feature on the dev-dependency, never compiled into
+      release).
+- [ ] The app surfaces its threat model — what it protects, what it
+      doesn't, residual risks accepted — in a `THREAT_MODEL.md` at the
+      repo root, sibling to `SECURITY.md`.
+- [ ] Cross-tenant safety: any process-wide cache (e.g. a decrypted
+      bundle cache) is keyed on the storage location it came from, so
+      a long-running agent cannot return one tenant's bundle to
+      another.
 
 ### Type 3 Implementation Guide
 
