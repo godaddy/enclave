@@ -149,7 +149,18 @@ impl EnclaveSigner for SecureEnclaveSigner {
                 let token = handle.as_ref().map(|h| h.token()).unwrap_or(0);
                 self.sign_inner(label, data, token)
             }
-            PresenceMode::None => self.sign_inner(label, data, 0),
+            PresenceMode::None => {
+                // The SE key itself doesn't require user presence, but the
+                // wrapping key always has `.userPresence` on macOS. Without a
+                // LAContext the wrapping-key Touch ID fires with the system
+                // default dialog — no custom reason string. Providing a
+                // one-shot context costs nothing (the same Touch ID prompt
+                // fires either way) but makes the dialog show the caller's
+                // reason instead of a blank system prompt.
+                let handle = lacontext::create_once(reason);
+                let token = handle.as_ref().map(|h| h.token()).unwrap_or(0);
+                self.sign_inner(label, data, token)
+            }
         }
     }
 }
