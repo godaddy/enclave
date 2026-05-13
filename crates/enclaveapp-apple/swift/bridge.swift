@@ -103,6 +103,13 @@ public func enclaveapp_se_lacontext_create(
     } else {
         reason = "Authenticate to use your Secure Enclave keys."
     }
+    // Set localizedReason on the context so that implicit re-authentication
+    // (e.g. when touchIDAuthenticationAllowableReuseDuration expires and
+    // macOS re-prompts through a SecItem or SE key access) uses the same
+    // descriptive string. Without this, implicit re-auth shows the generic
+    // "[AppName] needs to authenticate to continue." default because macOS
+    // reads ctx.localizedReason — not the evaluatePolicy localizedReason param.
+    ctx.localizedReason = reason
 
     // `canEvaluatePolicy` rejects the call with an explicit error
     // before showing UI if the device has no enrolled biometrics /
