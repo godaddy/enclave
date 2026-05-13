@@ -855,6 +855,19 @@ jobs:
           $(echo -e "${install_body}")
             end
 
+            def post_install
+              # Restart a running LaunchAgent-managed daemon so users pick up the
+              # new binary immediately after `brew upgrade`. With KeepAlive=true in
+              # the plist, `launchctl stop` causes launchd to relaunch the process
+              # from the updated Homebrew symlink automatically. No-op if the
+              # LaunchAgent has not been installed yet (fresh install, or the user
+              # manages the daemon themselves).
+              plist = "\#{Dir.home}/Library/LaunchAgents/com.godaddy.\#{name}.agent.plist"
+              if File.exist?(plist)
+                system "launchctl", "stop", "com.godaddy.\#{name}.agent"
+              end
+            end
+
             test do
               assert_match "${app}", shell_output("\#{bin}/${app} --help 2>&1", 2)
             end
