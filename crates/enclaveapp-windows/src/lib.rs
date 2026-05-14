@@ -14,6 +14,8 @@
 #[cfg(target_os = "windows")]
 mod export;
 #[cfg(target_os = "windows")]
+pub mod hello_gate;
+#[cfg(target_os = "windows")]
 mod key;
 #[cfg(target_os = "windows")]
 pub mod meta_hmac;
