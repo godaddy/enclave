@@ -857,14 +857,17 @@ jobs:
 
             def post_install
               # Restart a running LaunchAgent-managed daemon so users pick up the
-              # new binary immediately after `brew upgrade`. With KeepAlive=true in
-              # the plist, `launchctl stop` causes launchd to relaunch the process
-              # from the updated Homebrew symlink automatically. No-op if the
-              # LaunchAgent has not been installed yet (fresh install, or the user
-              # manages the daemon themselves).
+              # new binary immediately after `brew upgrade`. `kickstart -k` kills
+              # and relaunches the service; with KeepAlive=true launchd always
+              # restarts it. Explicitly targets the gui/<uid> bootstrap domain so
+              # this works when brew runs in a background auto-updater context
+              # (which lacks the default user session domain that plain
+              # `launchctl stop` targets). No-op if the LaunchAgent has not been
+              # installed yet.
               plist = "\#{Dir.home}/Library/LaunchAgents/com.godaddy.\#{name}.agent.plist"
               if File.exist?(plist)
-                system "launchctl", "stop", "com.godaddy.\#{name}.agent"
+                uid = `id -u`.strip
+                system "launchctl", "kickstart", "-k", "gui/\#{uid}/com.godaddy.\#{name}.agent"
               end
             end
 
