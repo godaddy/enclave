@@ -866,7 +866,7 @@ jobs:
               # installed yet.
               plist = "\#{Dir.home}/Library/LaunchAgents/com.godaddy.\#{name}.agent.plist"
               if File.exist?(plist)
-                uid = `id -u`.strip
+                uid = Process.uid.to_s
                 system "launchctl", "kickstart", "-k", "gui/\#{uid}/com.godaddy.\#{name}.agent"
               end
             end
