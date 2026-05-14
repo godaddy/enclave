@@ -576,4 +576,19 @@ mod tests {
         drop(child.kill());
         drop(child.wait());
     }
+
+    #[test]
+    fn line_reader_eof_disconnects_and_returns_empty_string() {
+        // An immediately-empty reader causes the background thread to hit EOF
+        // and exit, dropping the sender. The next recv_line must return
+        // Completed(Ok("")) via the Disconnected arm rather than TimedOut.
+        let reader = LineReaderWithTimeout::new(io::Cursor::new(b""));
+        // Give the background thread time to reach EOF and exit.
+        thread::sleep(Duration::from_millis(50));
+        let result = reader.recv_line(Duration::from_millis(200));
+        assert!(
+            matches!(result, TimeoutResult::Completed(Ok(ref s)) if s.is_empty()),
+            "expected Completed(Ok(\"\")) after sender disconnect, got: {result:?}"
+        );
+    }
 }

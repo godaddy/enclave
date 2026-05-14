@@ -240,4 +240,19 @@ mod tests {
         let input = "Ubuntu 22.04 LTS";
         assert_eq!(decode_wsl_output(input.as_bytes()), input);
     }
+
+    #[test]
+    fn decode_utf16le_odd_length_ignores_trailing_byte() {
+        // chunks_exact(2) silently drops the trailing unpaired byte.
+        // "AB" as UTF-16LE = [0x41, 0x00, 0x42, 0x00], plus one extra byte.
+        let bytes: &[u8] = &[0x41, 0x00, 0x42, 0x00, 0xFF];
+        assert_eq!(decode_utf16le(bytes), "AB");
+    }
+
+    #[test]
+    fn decode_utf16le_non_ascii_codepoint() {
+        // U+00E9 LATIN SMALL LETTER E WITH ACUTE, encoded as UTF-16LE: [0xE9, 0x00]
+        let bytes: &[u8] = &[0xE9, 0x00];
+        assert_eq!(decode_utf16le(bytes), "\u{00E9}");
+    }
 }
