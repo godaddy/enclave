@@ -69,6 +69,23 @@ const MIN_CIPHERTEXT_LEN: usize = 1 + 65 + GCM_NONCE_SIZE + GCM_TAG_SIZE;
 pub struct TpmEncryptor {
     app_name: String,
     keys_dir_override: Option<std::path::PathBuf>,
+    /// When `Some`, this encryptor surfaces a Windows Hello biometric/PIN
+    /// prompt before each `decrypt` call (skipping it when the cache is
+    /// fresh). The key is created without `NCRYPT_UI_PROTECT_KEY_FLAG` so
+    /// the legacy CryptUI password dialog never fires.
+    ///
+    /// **Threat-model trade-off**: the gate is enforced at the app level
+    /// via the `Verified` boolean returned by `UserConsentVerifier`. A
+    /// same-UID attacker with code execution inside the host process can
+    /// hook the result and bypass the gate. See [`crate::hello_gate`]
+    /// for the full documentation.
+    hello_gate: Option<std::sync::Arc<crate::hello_gate::HelloGate>>,
+    /// Cache TTL for the Hello gate. `Duration::ZERO` disables caching
+    /// (prompt on every call). Ignored when `hello_gate` is `None`.
+    hello_cache_ttl: std::time::Duration,
+    /// Message shown in the Hello prompt. Defaults to a generic string;
+    /// callers can override via [`TpmEncryptor::with_hello_prompt`].
+    hello_prompt: String,
 }
 
 impl TpmEncryptor {
@@ -77,6 +94,9 @@ impl TpmEncryptor {
         TpmEncryptor {
             app_name: app_name.to_string(),
             keys_dir_override: None,
+            hello_gate: None,
+            hello_cache_ttl: std::time::Duration::ZERO,
+            hello_prompt: default_hello_prompt(app_name),
         }
     }
 
@@ -85,7 +105,40 @@ impl TpmEncryptor {
         TpmEncryptor {
             app_name: app_name.to_string(),
             keys_dir_override: Some(keys_dir),
+            hello_gate: None,
+            hello_cache_ttl: std::time::Duration::ZERO,
+            hello_prompt: default_hello_prompt(app_name),
         }
+    }
+
+    /// Enable the Windows Hello soft-gate on this encryptor. When set,
+    /// keys are created without `NCRYPT_UI_PROTECT_KEY_FLAG` (so the
+    /// CryptUI password dialog never fires) and every `decrypt` call is
+    /// gated by [`crate::hello_gate::HelloGate::ensure_verified`] with
+    /// the supplied `cache_ttl`. See [`crate::hello_gate`] for the
+    /// documented threat-model trade-off.
+    #[must_use]
+    pub fn with_hello_gate(
+        mut self,
+        gate: std::sync::Arc<crate::hello_gate::HelloGate>,
+        cache_ttl: std::time::Duration,
+    ) -> Self {
+        self.hello_gate = Some(gate);
+        self.hello_cache_ttl = cache_ttl;
+        self
+    }
+
+    /// Override the message shown in the Hello prompt. No effect when
+    /// the Hello gate is not enabled.
+    #[must_use]
+    pub fn with_hello_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.hello_prompt = prompt.into();
+        self
+    }
+
+    /// True if the Hello soft-gate is enabled on this encryptor.
+    pub fn hello_gate_enabled(&self) -> bool {
+        self.hello_gate.is_some()
     }
 
     fn keys_dir(&self) -> std::path::PathBuf {
@@ -93,6 +146,21 @@ impl TpmEncryptor {
             .clone()
             .unwrap_or_else(|| metadata::keys_dir(&self.app_name))
     }
+
+    /// If the Hello gate is enabled, ensure the user has been verified
+    /// within `hello_cache_ttl`. Returns `Ok(())` immediately when the
+    /// gate is not enabled.
+    fn ensure_hello_verified(&self, label: &str) -> Result<()> {
+        let Some(gate) = self.hello_gate.as_ref() else {
+            return Ok(());
+        };
+        let scope = format!("{}:{}", self.app_name, label);
+        gate.ensure_verified(&scope, &self.hello_prompt, self.hello_cache_ttl)
+    }
+}
+
+fn default_hello_prompt(app_name: &str) -> String {
+    format!("Unlock {app_name} credentials")
 }
 
 impl EnclaveKeyManager for TpmEncryptor {
@@ -226,9 +294,15 @@ impl EnclaveEncryptor for TpmEncryptor {
         // key that has the expected CNG name but a different (or
         // missing) UI flag -- without this check the library might
         // decrypt through a key that has no hardware-enforced UI
-        // gate. The TPM itself fires the CryptUI password dialog
-        // at the ECDH call below if the flag is set; we don't
-        // issue any user-mode prompts here.
+        // gate.
+        //
+        // When the Hello soft-gate is enabled, the key is intentionally
+        // created with no `NCRYPT_UI_PROTECT_KEY_FLAG` (so the legacy
+        // CryptUI password dialog never fires) and the on-disk
+        // AccessPolicy is recorded as `None`. The application-level
+        // [`HelloGate`] enforces user presence instead — see the
+        // threat-model documentation in [`crate::hello_gate`] and on
+        // [`enclaveapp_app_storage::StorageConfig::prefer_windows_hello_ux`].
         let dir = self.keys_dir();
         let expected_policy = match metadata::load_meta(&dir, label) {
             Ok(meta) => meta.access_policy,
@@ -236,6 +310,11 @@ impl EnclaveEncryptor for TpmEncryptor {
             Err(err) => return Err(err),
         };
         crate::ui_policy::verify_ui_policy_matches(&key_handle, expected_policy)?;
+
+        // Hello soft-gate: fire the biometric/PIN prompt (or use the
+        // cached verification) before invoking the TPM private-key
+        // operation. No-op when the gate is not configured.
+        self.ensure_hello_verified(label)?;
 
         unsafe { ecies_decrypt(&key_handle, ephemeral_pub, nonce, ct, tag) }
     }

@@ -25,6 +25,8 @@ pub mod meta_tag;
 mod provider;
 #[cfg(target_os = "windows")]
 pub mod ui_policy;
+#[cfg(target_os = "windows")]
+pub mod hello_gate;
 
 #[cfg(all(target_os = "windows", feature = "encryption"))]
 mod encrypt;

@@ -24,6 +24,7 @@
 //!     wrapping_key_user_presence: false,
 //!     wrapping_key_cache_ttl: std::time::Duration::ZERO,
 //!     keychain_access_group: None,
+//!     prefer_windows_hello_ux: false,
 //! })?;
 //!
 //! let ciphertext = storage.encrypt(b"secret")?;
@@ -45,6 +46,7 @@
 //!     wrapping_key_user_presence: false,
 //!     wrapping_key_cache_ttl: std::time::Duration::ZERO,
 //!     keychain_access_group: None,
+//!     prefer_windows_hello_ux: false,
 //! })?;
 //!
 //! // Use the underlying signer/key_manager for operations.
@@ -123,6 +125,32 @@ pub struct StorageConfig {
     /// which accepts unsigned callers but rejects userPresence ACLs.
     /// Default: `None`.
     pub keychain_access_group: Option<String>,
+    /// (Windows only) Surface a Windows Hello biometric/PIN prompt at
+    /// encrypt/decrypt time instead of the legacy `NCRYPT_UI_PROTECT_KEY_FLAG`
+    /// CryptUI password protector dialog. When `true`:
+    ///
+    /// - The TPM encryption key is created WITHOUT `NCRYPT_UI_PROTECT_KEY_FLAG`,
+    ///   so the OS does not surface the legacy password dialog at finalize
+    ///   or at sign/decrypt time.
+    /// - Each encrypt and decrypt is gated by
+    ///   `Windows.Security.Credentials.UI.UserConsentVerifier.RequestVerificationAsync(...)`,
+    ///   which fires the modern Windows Hello biometric/PIN UI.
+    /// - The verification is cached for `wrapping_key_cache_ttl` so repeated
+    ///   operations within the window do not re-prompt.
+    ///
+    /// **Threat-model trade-off:** The `Verified` Boolean returned by
+    /// `UserConsentVerifier` is a user-mode result consumed by the calling
+    /// process. A same-UID attacker with code execution inside the host
+    /// process can hook the Boolean and bypass the gate; the Hello prompt
+    /// would never need to fire. This is materially weaker than the legacy
+    /// `NCRYPT_UI_PROTECT_KEY_FLAG` path, where the dialog is mediated
+    /// out-of-process by `consent.exe`. Apps that opt in are choosing
+    /// **Hello UX over hard-gate threat model** — appropriate when the
+    /// encrypted material is short-lived, auto-rotated, or the threat
+    /// model accepts same-UID equivalence.
+    ///
+    /// No-op on non-Windows platforms. Default: `false`.
+    pub prefer_windows_hello_ux: bool,
 }
 
 /// Environment variable that, when the `mock` cargo feature is
@@ -186,6 +214,7 @@ mod tests {
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
+            prefer_windows_hello_ux: false,
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("test"));
@@ -204,6 +233,7 @@ mod tests {
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
+            prefer_windows_hello_ux: false,
         };
         let cloned = config.clone();
         assert_eq!(cloned.app_name, "test");

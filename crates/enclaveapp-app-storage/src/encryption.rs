@@ -148,24 +148,47 @@ impl AppEncryptionStorage {
     #[cfg(target_os = "windows")]
     fn init_windows(config: &StorageConfig) -> Result<Self> {
         let keys_dir = Self::resolved_keys_dir(config);
-        let encryptor =
+
+        // When the app opts into `prefer_windows_hello_ux`, the TPM key
+        // is created without `NCRYPT_UI_PROTECT_KEY_FLAG` (no CryptUI
+        // password dialog) and the on-disk AccessPolicy is forced to
+        // `None`. Application-level Hello verification via
+        // `UserConsentVerifier` gates the actual private-key operations.
+        // See `enclaveapp_windows::hello_gate` for the documented
+        // threat-model trade-off and `StorageConfig::prefer_windows_hello_ux`
+        // for the per-app opt-in semantics.
+        let (effective_policy, hello_gate) = if config.prefer_windows_hello_ux {
+            let gate = std::sync::Arc::new(enclaveapp_windows::hello_gate::HelloGate::new());
+            (AccessPolicy::None, Some(gate))
+        } else {
+            (config.access_policy, None)
+        };
+
+        let mut encryptor =
             enclaveapp_windows::TpmEncryptor::with_keys_dir(&config.app_name, keys_dir.clone());
+        if let Some(gate) = hello_gate.clone() {
+            encryptor = encryptor.with_hello_gate(gate, config.wrapping_key_cache_ttl);
+        }
 
         if !encryptor.is_available() {
             return Err(StorageError::NotAvailable);
         }
 
-        Self::ensure_key(&encryptor, config, &keys_dir, config.access_policy)?;
+        Self::ensure_key(&encryptor, config, &keys_dir, effective_policy)?;
         debug!(
-            "TPM encryption ready (app={}, label={}, policy={:?})",
-            config.app_name, config.key_label, config.access_policy
+            "TPM encryption ready (app={}, label={}, requested_policy={:?}, effective_policy={:?}, hello_gate={})",
+            config.app_name,
+            config.key_label,
+            config.access_policy,
+            effective_policy,
+            hello_gate.is_some(),
         );
 
         Ok(Self {
             kind: BackendKind::Tpm,
             app_name: config.app_name.clone(),
             key_label: config.key_label.clone(),
-            access_policy: config.access_policy,
+            access_policy: effective_policy,
             keys_dir,
             inner: StorageInner::Tpm(encryptor),
         })
@@ -630,6 +653,7 @@ mod tests {
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
+            prefer_windows_hello_ux: false,
         }
     }
 
