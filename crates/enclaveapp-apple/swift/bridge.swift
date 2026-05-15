@@ -14,6 +14,7 @@
 // blob containing a handle to the SE key. The actual private key material
 // never leaves the Secure Enclave.
 
+import CoreGraphics
 import CryptoKit
 import Foundation
 import LocalAuthentication
@@ -55,6 +56,13 @@ let SE_ERR_KEYCHAIN_AUTH_DENIED: Int32 = 13
 /// may be locked or biometric auth was cancelled; the caller should retry
 /// after the user unlocks the screen.
 let SE_ERR_KEYCHAIN_INTERACTION_REQUIRED: Int32 = 14
+/// Returned when `SecItemCopyMatching` returns `errSecInteractionRequired`
+/// and `CGSessionCopyCurrentDictionary()` returns nil — meaning the process
+/// has no window server session at all.  Touch ID requires a window server
+/// connection to display its prompt; background processes started outside of
+/// launchd (e.g. `sshenc-agent &` in a shell) never get one.  Recovery:
+/// restart the agent via launchd so it inherits the user's GUI session.
+let SE_ERR_KEYCHAIN_NO_WINDOW_SERVER: Int32 = 15
 
 // MARK: - ECIES format constants
 
@@ -265,6 +273,26 @@ func copyDataRep(
 @_cdecl("enclaveapp_se_available")
 public func enclaveapp_se_available() -> Int32 {
     return SecureEnclave.isAvailable ? 1 : 0
+}
+
+/// Returns 1 if Touch ID (or device auth) is evaluable in this process,
+/// 0 otherwise.  A return of 0 means one of:
+///   - The process has no window server connection (started outside launchd).
+///   - No biometrics enrolled and no device passcode set.
+/// In either case, `lacontext_create` will return 0 and every sign with
+/// a `.userPresence` key will get `errSecInteractionRequired`.
+///
+/// This is a startup diagnostic — call once after the agent initialises
+/// and warn / auto-reload via launchd if the result is 0.
+@_cdecl("enclaveapp_se_touch_id_available")
+public func enclaveapp_se_touch_id_available() -> Int32 {
+    // No window server session → Touch ID UI cannot be shown.
+    guard CGSessionCopyCurrentDictionary() != nil else {
+        return 0
+    }
+    let ctx = LAContext()
+    var error: NSError?
+    return ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) ? 1 : 0
 }
 
 // MARK: - Signing key operations
@@ -1035,6 +1063,13 @@ public func enclaveapp_keychain_load(
             return SE_ERR_KEYCHAIN_AUTH_DENIED
         }
         if status == errSecInteractionRequired {
+            // Distinguish "no window server" (agent started outside launchd)
+            // from "screen locked" (agent is fine, user needs to unlock).
+            // CGSessionCopyCurrentDictionary() returns nil when the process
+            // has no window server connection at all.
+            if CGSessionCopyCurrentDictionary() == nil {
+                return SE_ERR_KEYCHAIN_NO_WINDOW_SERVER
+            }
             return SE_ERR_KEYCHAIN_INTERACTION_REQUIRED
         }
         if status != errSecSuccess {

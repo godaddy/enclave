@@ -55,6 +55,17 @@ pub enum Error {
     )]
     KeychainInteractionRequired { label: String },
 
+    /// The agent process has no window server connection, so Touch ID UI
+    /// cannot be displayed.  This happens when the agent is started outside
+    /// of launchd (e.g. `sshenc-agent &` in a shell).  Recovery: restart
+    /// the agent via launchd so it inherits the user's GUI session.
+    #[error(
+        "no window server access for '{label}': Touch ID requires a GUI session; \
+         restart the agent via launchd: \
+         launchctl load ~/Library/LaunchAgents/com.godaddy.sshenc.agent.plist"
+    )]
+    KeychainNoWindowServer { label: String },
+
     #[error("config error: {0}")]
     Config(String),
 
@@ -188,6 +199,23 @@ mod tests {
         assert!(
             msg.contains("locked") || msg.contains("unlock") || msg.contains("retry"),
             "message must include recovery guidance"
+        );
+    }
+
+    #[test]
+    fn display_keychain_no_window_server() {
+        let e = Error::KeychainNoWindowServer {
+            label: "mykey".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("mykey"), "message must name the label");
+        assert!(
+            msg.contains("window server") || msg.contains("GUI"),
+            "message must mention window server"
+        );
+        assert!(
+            msg.contains("launchctl") || msg.contains("launchd"),
+            "message must include launchd remediation guidance"
         );
     }
 

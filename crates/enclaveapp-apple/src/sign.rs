@@ -21,10 +21,31 @@ fn should_evict_lacontext(e: &Error) -> bool {
     //   (lacontext_token=0). Nothing is cached for this label, so evict
     //   is a no-op. The cause is typically a locked screen; when the user
     //   unlocks, the next acquire() will create a fresh context normally.
+    //
+    // - KeychainNoWindowServer: same as InteractionRequired — token was 0,
+    //   nothing cached. The cause is the agent running outside launchd;
+    //   evicting is a no-op and the fix is to restart via launchd.
     !matches!(
         e,
-        Error::KeychainAuthDenied { .. } | Error::KeychainInteractionRequired { .. }
+        Error::KeychainAuthDenied { .. }
+            | Error::KeychainInteractionRequired { .. }
+            | Error::KeychainNoWindowServer { .. }
     )
+}
+
+/// Returns `true` if Touch ID (or device passcode auth) is evaluable in
+/// this process — meaning the process has a window server session and the
+/// device has enrolled biometrics or a passcode set.
+///
+/// Returns `false` when:
+/// - The process has no window server connection (started outside launchd).
+/// - The device has no enrolled biometrics and no passcode.
+///
+/// Use this as a startup diagnostic to detect the "agent launched outside
+/// launchd" misconfiguration before the first sign request fails.
+#[allow(unsafe_code)]
+pub fn touch_id_available() -> bool {
+    unsafe { ffi::enclaveapp_se_touch_id_available() == 1 }
 }
 
 /// ECDSA P-256 signing backend using the macOS Secure Enclave.

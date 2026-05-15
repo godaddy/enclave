@@ -32,6 +32,8 @@ mod sign;
 #[cfg(all(target_os = "macos", feature = "encryption"))]
 pub use encrypt::SecureEnclaveEncryptor;
 #[cfg(all(target_os = "macos", feature = "signing"))]
+pub use sign::touch_id_available;
+#[cfg(all(target_os = "macos", feature = "signing"))]
 pub use sign::SecureEnclaveSigner;
 
 // Export the keychain config so consumers can opt into

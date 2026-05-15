@@ -12,6 +12,10 @@
 extern "C" {
     pub fn enclaveapp_se_available() -> i32;
 
+    /// Returns 1 if Touch ID / device auth is evaluable in this process,
+    /// 0 otherwise (no window server session, or no enrolled biometrics/passcode).
+    pub fn enclaveapp_se_touch_id_available() -> i32;
+
     // Signing key operations
     pub fn enclaveapp_se_generate_signing_key(
         pub_key_out: *mut u8,
