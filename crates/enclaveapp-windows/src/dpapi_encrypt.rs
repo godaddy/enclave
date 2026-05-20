@@ -236,7 +236,7 @@ impl EnclaveEncryptor for DpapiEncryptor {
 fn load_secret_key(key_path: &std::path::Path, label: &str) -> Result<SecretKey> {
     let protected = match metadata::read_no_follow(key_path) {
         Ok(bytes) => bytes,
-        Err(err) if matches!(err, Error::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound) => {
+        Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(Error::KeyNotFound {
                 label: label.to_string(),
             });

@@ -174,7 +174,7 @@ fn registry_string(subkey: &str, value_name: &str) -> Option<String> {
             windows::core::PCWSTR(value_name.as_ptr()),
             RRF_RT_REG_SZ,
             Some(&mut ty),
-            Some(buf.as_mut_ptr() as *mut c_void),
+            Some(buf.as_mut_ptr().cast::<c_void>()),
             Some(&mut bytes),
         )
     };
