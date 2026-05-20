@@ -76,6 +76,7 @@ fn kind_str(kind: BackendKind) -> &'static str {
     match kind {
         BackendKind::SecureEnclave => "se",
         BackendKind::Tpm => "tpm",
+        BackendKind::WindowsDpapi => "windows-dpapi",
         BackendKind::TpmBridge => "tpm-bridge",
         BackendKind::Keyring => "keyring",
     }
@@ -85,6 +86,7 @@ fn parse_kind(s: &str) -> Option<BackendKind> {
     match s {
         "se" => Some(BackendKind::SecureEnclave),
         "tpm" => Some(BackendKind::Tpm),
+        "windows-dpapi" => Some(BackendKind::WindowsDpapi),
         "tpm-bridge" => Some(BackendKind::TpmBridge),
         "keyring" => Some(BackendKind::Keyring),
         _ => None,
@@ -126,6 +128,7 @@ mod tests {
         for kind in [
             BackendKind::SecureEnclave,
             BackendKind::Tpm,
+            BackendKind::WindowsDpapi,
             BackendKind::TpmBridge,
             BackendKind::Keyring,
         ] {
@@ -168,6 +171,11 @@ mod tests {
     }
 
     #[test]
+    fn parse_kind_windows_dpapi_returns_windows_dpapi() {
+        assert_eq!(parse_kind("windows-dpapi"), Some(BackendKind::WindowsDpapi));
+    }
+
+    #[test]
     fn parse_kind_tpm_bridge_returns_tpm_bridge() {
         assert_eq!(parse_kind("tpm-bridge"), Some(BackendKind::TpmBridge));
     }
@@ -190,6 +198,7 @@ mod tests {
         for kind in [
             BackendKind::SecureEnclave,
             BackendKind::Tpm,
+            BackendKind::WindowsDpapi,
             BackendKind::TpmBridge,
             BackendKind::Keyring,
         ] {
@@ -203,6 +212,7 @@ mod tests {
         for kind in [
             BackendKind::SecureEnclave,
             BackendKind::Tpm,
+            BackendKind::WindowsDpapi,
             BackendKind::TpmBridge,
             BackendKind::Keyring,
         ] {

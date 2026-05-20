@@ -45,6 +45,9 @@ enum StorageInner {
     #[cfg(target_os = "windows")]
     Tpm(enclaveapp_windows::TpmEncryptor),
 
+    #[cfg(target_os = "windows")]
+    WindowsDpapi(enclaveapp_windows::DpapiEncryptor),
+
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     LinuxTpm(enclaveapp_linux_tpm::LinuxTpmEncryptor),
 
@@ -147,6 +150,36 @@ impl AppEncryptionStorage {
 
     #[cfg(target_os = "windows")]
     fn init_windows(config: &StorageConfig) -> Result<Self> {
+        match Self::init_windows_tpm(config) {
+            Ok(storage) => Ok(storage),
+            Err(err) => {
+                if config.windows_software_fallback != crate::WindowsSoftwareFallback::VmOnly {
+                    return Err(err);
+                }
+                let decision =
+                    enclaveapp_windows::dpapi_fallback::should_use_dpapi_after_tpm_failure(
+                        &format!("{err:#}"),
+                    );
+                if !decision.allowed {
+                    tracing::warn!(
+                        app = %config.app_name,
+                        reason = %decision.reason,
+                        "Windows DPAPI fallback denied after TPM storage failure"
+                    );
+                    return Err(err);
+                }
+                tracing::warn!(
+                    app = %config.app_name,
+                    reason = %decision.reason,
+                    "Windows TPM storage unavailable on VM host; using per-user DPAPI fallback"
+                );
+                Self::init_windows_dpapi(config)
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn init_windows_tpm(config: &StorageConfig) -> Result<Self> {
         let keys_dir = Self::resolved_keys_dir(config);
 
         // When the app opts into `prefer_windows_hello_ux`, the TPM key
@@ -208,6 +241,30 @@ impl AppEncryptionStorage {
             access_policy: effective_policy,
             keys_dir,
             inner: StorageInner::Tpm(encryptor),
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn init_windows_dpapi(config: &StorageConfig) -> Result<Self> {
+        let keys_dir = Self::resolved_keys_dir(config);
+        if config.access_policy != AccessPolicy::None {
+            tracing::warn!(
+                app = %config.app_name,
+                requested_policy = ?config.access_policy,
+                "Windows DPAPI fallback does not enforce AccessPolicy; recording AccessPolicy::None"
+            );
+        }
+        let effective_policy = AccessPolicy::None;
+        let encryptor =
+            enclaveapp_windows::DpapiEncryptor::with_keys_dir(&config.app_name, keys_dir.clone());
+        Self::ensure_key(&encryptor, config, &keys_dir, effective_policy)?;
+        Ok(Self {
+            kind: BackendKind::WindowsDpapi,
+            app_name: config.app_name.clone(),
+            key_label: config.key_label.clone(),
+            access_policy: effective_policy,
+            keys_dir,
+            inner: StorageInner::WindowsDpapi(encryptor),
         })
     }
 
@@ -520,6 +577,11 @@ impl EncryptionStorage for AppEncryptionStorage {
                 .encrypt(&self.key_label, plaintext)
                 .map_err(|e| StorageError::EncryptionFailed(e.to_string())),
 
+            #[cfg(target_os = "windows")]
+            StorageInner::WindowsDpapi(enc) => enc
+                .encrypt(&self.key_label, plaintext)
+                .map_err(|e| StorageError::EncryptionFailed(e.to_string())),
+
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             StorageInner::LinuxTpm(enc) => enc
                 .encrypt(&self.key_label, plaintext)
@@ -565,6 +627,11 @@ impl EncryptionStorage for AppEncryptionStorage {
                 .decrypt(&self.key_label, ciphertext)
                 .map_err(|e| StorageError::DecryptionFailed(e.to_string())),
 
+            #[cfg(target_os = "windows")]
+            StorageInner::WindowsDpapi(enc) => enc
+                .decrypt(&self.key_label, ciphertext)
+                .map_err(|e| StorageError::DecryptionFailed(e.to_string())),
+
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             StorageInner::LinuxTpm(enc) => enc
                 .decrypt(&self.key_label, ciphertext)
@@ -599,6 +666,11 @@ impl EncryptionStorage for AppEncryptionStorage {
                 .delete_key(&self.key_label)
                 .map_err(|e| StorageError::KeyNotFound(e.to_string())),
 
+            #[cfg(target_os = "windows")]
+            StorageInner::WindowsDpapi(enc) => enc
+                .delete_key(&self.key_label)
+                .map_err(|e| StorageError::KeyNotFound(e.to_string())),
+
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             StorageInner::LinuxTpm(enc) => enc
                 .delete_key(&self.key_label)
@@ -625,6 +697,7 @@ impl EncryptionStorage for AppEncryptionStorage {
         match self.kind {
             BackendKind::SecureEnclave => "Secure Enclave",
             BackendKind::Tpm => "TPM 2.0",
+            BackendKind::WindowsDpapi => "Windows DPAPI",
             BackendKind::TpmBridge => "TPM 2.0 (WSL Bridge)",
             BackendKind::Keyring => "Linux (keyring)",
         }
@@ -671,6 +744,7 @@ mod tests {
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
+            windows_software_fallback: crate::WindowsSoftwareFallback::Disabled,
         }
     }
 

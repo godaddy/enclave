@@ -12,7 +12,10 @@
 //!
 //! For encryption (awsenc, sso-jwt):
 //! ```no_run
-//! use enclaveapp_app_storage::{AppEncryptionStorage, StorageConfig, AccessPolicy, EncryptionStorage};
+//! use enclaveapp_app_storage::{
+//!     AccessPolicy, AppEncryptionStorage, EncryptionStorage, StorageConfig,
+//!     WindowsSoftwareFallback,
+//! };
 //!
 //! let storage = AppEncryptionStorage::init(StorageConfig {
 //!     app_name: "myapp".into(),
@@ -25,6 +28,7 @@
 //!     wrapping_key_cache_ttl: std::time::Duration::ZERO,
 //!     keychain_access_group: None,
 //!     prefer_windows_hello_ux: false,
+//!     windows_software_fallback: WindowsSoftwareFallback::Disabled,
 //! })?;
 //!
 //! let ciphertext = storage.encrypt(b"secret")?;
@@ -34,7 +38,9 @@
 //!
 //! For signing (sshenc):
 //! ```no_run
-//! use enclaveapp_app_storage::{AppSigningBackend, StorageConfig, AccessPolicy};
+//! use enclaveapp_app_storage::{
+//!     AccessPolicy, AppSigningBackend, StorageConfig, WindowsSoftwareFallback,
+//! };
 //!
 //! let backend = AppSigningBackend::init(StorageConfig {
 //!     app_name: "sshenc".into(),
@@ -47,6 +53,7 @@
 //!     wrapping_key_cache_ttl: std::time::Duration::ZERO,
 //!     keychain_access_group: None,
 //!     prefer_windows_hello_ux: false,
+//!     windows_software_fallback: WindowsSoftwareFallback::Disabled,
 //! })?;
 //!
 //! // Use the underlying signer/key_manager for operations.
@@ -76,6 +83,19 @@ pub use signing::AppSigningBackend;
 pub use enclaveapp_core::metadata::KeyMeta;
 pub use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager, EnclaveSigner};
 pub use enclaveapp_core::types::{AccessPolicy, KeyType};
+
+/// Policy for using a software-backed Windows credential store when
+/// the TPM-backed Platform Crypto Provider cannot create or open a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsSoftwareFallback {
+    /// Never fall back from Windows TPM-backed storage.
+    Disabled,
+    /// Fall back only when libenclaveapp detects both a TPM failure
+    /// and a VM environment. This is intended for virtualized hosts
+    /// that lack TPM 2.0 passthrough, while keeping physical machines
+    /// fail-closed instead of silently downgrading.
+    VmOnly,
+}
 
 /// Configuration for initializing application storage.
 #[derive(Debug, Clone)]
@@ -174,6 +194,14 @@ pub struct StorageConfig {
     ///
     /// No-op on non-Windows platforms. Default: `false`.
     pub prefer_windows_hello_ux: bool,
+    /// (Windows only) Whether a VM host without usable TPM 2.0
+    /// may use a per-user DPAPI-backed software key instead of failing.
+    ///
+    /// The downgrade decision itself is made inside libenclaveapp's
+    /// Windows backend using local machine signals: this field only
+    /// opts the application into the policy. There is no environment
+    /// variable override for production binaries.
+    pub windows_software_fallback: WindowsSoftwareFallback,
 }
 
 /// Environment variable that, when the `mock` cargo feature is
@@ -238,6 +266,7 @@ mod tests {
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
+            windows_software_fallback: WindowsSoftwareFallback::Disabled,
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("test"));
@@ -257,6 +286,7 @@ mod tests {
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
+            windows_software_fallback: WindowsSoftwareFallback::Disabled,
         };
         let cloned = config.clone();
         assert_eq!(cloned.app_name, "test");
@@ -320,6 +350,7 @@ mod tests {
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
+            windows_software_fallback: WindowsSoftwareFallback::Disabled,
         };
         assert_eq!(config.app_name, "myapp");
         assert_eq!(config.key_label, "default");
@@ -345,6 +376,7 @@ mod tests {
             wrapping_key_cache_ttl: std::time::Duration::from_secs(30),
             keychain_access_group: Some("TEAMID.com.example".into()),
             prefer_windows_hello_ux: false,
+            windows_software_fallback: WindowsSoftwareFallback::Disabled,
         };
         assert!(config.wrapping_key_user_presence);
         assert_eq!(
@@ -371,6 +403,7 @@ mod tests {
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
             prefer_windows_hello_ux: false,
+            windows_software_fallback: WindowsSoftwareFallback::Disabled,
         };
         assert_eq!(config.keys_dir.as_ref(), Some(&dir));
         assert!(config.force_keyring);

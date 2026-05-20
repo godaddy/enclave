@@ -20,6 +20,10 @@ enclaveapp-core = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+aes-gcm = { workspace = true }
+elliptic-curve = { workspace = true }
+p256 = { workspace = true }
+rand = { workspace = true }
 sha2 = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]

@@ -349,6 +349,8 @@ pub enum BackendKind {
     SecureEnclave,
     /// Windows TPM 2.0 via CNG.
     Tpm,
+    /// Windows per-user DPAPI fallback for VM hosts without TPM 2.0.
+    WindowsDpapi,
     /// WSL bridge to Windows TPM.
     TpmBridge,
     /// Keyring-backed P-256 keys (Linux without TPM).
@@ -360,6 +362,7 @@ impl std::fmt::Display for BackendKind {
         match self {
             BackendKind::SecureEnclave => write!(f, "Secure Enclave"),
             BackendKind::Tpm => write!(f, "TPM 2.0"),
+            BackendKind::WindowsDpapi => write!(f, "Windows DPAPI"),
             BackendKind::TpmBridge => write!(f, "TPM 2.0 (WSL Bridge)"),
             BackendKind::Keyring => write!(f, "Keyring"),
         }
@@ -412,6 +415,7 @@ mod tests {
     fn backend_kind_display() {
         assert_eq!(BackendKind::SecureEnclave.to_string(), "Secure Enclave");
         assert_eq!(BackendKind::Tpm.to_string(), "TPM 2.0");
+        assert_eq!(BackendKind::WindowsDpapi.to_string(), "Windows DPAPI");
         assert_eq!(BackendKind::TpmBridge.to_string(), "TPM 2.0 (WSL Bridge)");
         assert_eq!(BackendKind::Keyring.to_string(), "Keyring");
     }
@@ -434,6 +438,7 @@ mod tests {
         for kind in [
             BackendKind::SecureEnclave,
             BackendKind::Tpm,
+            BackendKind::WindowsDpapi,
             BackendKind::TpmBridge,
             BackendKind::Keyring,
         ] {
@@ -447,6 +452,7 @@ mod tests {
         for kind in [
             BackendKind::SecureEnclave,
             BackendKind::Tpm,
+            BackendKind::WindowsDpapi,
             BackendKind::TpmBridge,
             BackendKind::Keyring,
         ] {
@@ -459,6 +465,7 @@ mod tests {
         let kinds = [
             BackendKind::SecureEnclave,
             BackendKind::Tpm,
+            BackendKind::WindowsDpapi,
             BackendKind::TpmBridge,
             BackendKind::Keyring,
         ];

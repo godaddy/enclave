@@ -197,6 +197,8 @@ impl EncryptedFileSecretStore {
                 wrapping_key_cache_ttl: std::time::Duration::ZERO,
                 keychain_access_group: None,
                 prefer_windows_hello_ux: false,
+                windows_software_fallback:
+                    enclaveapp_app_storage::WindowsSoftwareFallback::Disabled,
             })
             .map_err(|error| error.to_string())
         }) {

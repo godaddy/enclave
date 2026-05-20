@@ -12,6 +12,11 @@
 //! On non-Windows platforms this crate compiles as empty.
 
 #[cfg(target_os = "windows")]
+mod dpapi;
+#[cfg(all(target_os = "windows", feature = "encryption"))]
+mod dpapi_encrypt;
+pub mod dpapi_fallback;
+#[cfg(target_os = "windows")]
 mod export;
 #[cfg(target_os = "windows")]
 pub mod hello_gate;
@@ -33,6 +38,8 @@ mod encrypt;
 #[cfg(all(target_os = "windows", feature = "signing"))]
 mod sign;
 
+#[cfg(all(target_os = "windows", feature = "encryption"))]
+pub use dpapi_encrypt::DpapiEncryptor;
 #[cfg(all(target_os = "windows", feature = "encryption"))]
 pub use encrypt::TpmEncryptor;
 #[cfg(all(target_os = "windows", feature = "signing"))]
