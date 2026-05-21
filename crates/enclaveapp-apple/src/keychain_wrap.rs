@@ -297,6 +297,12 @@ fn cache_evict(app_name: &str, label: &str) {
     crate::lacontext::evict(app_name, label);
 }
 
+/// Evict the cached wrapping key and LAContext for `label`, forcing the
+/// next operation to reload from the keychain with a fresh LAContext.
+pub fn cache_evict_for(app_name: &str, label: &str) {
+    cache_evict(app_name, label);
+}
+
 /// Store a wrapping key in the login keychain. Replaces any existing
 /// entry for the same service+account pair.
 ///
@@ -456,14 +462,14 @@ pub(crate) fn keychain_load(
         }),
         14 => Err(Error::KeychainInteractionRequired {
             // SE_ERR_KEYCHAIN_INTERACTION_REQUIRED: macOS returned
-            // errSecInteractionRequired (-25308) and the process has a CG
+            // errSecInteractionNotAllowed (-25308) and the process has a CG
             // session — screen is locked or biometric was cancelled.
             // Transient: retry after the user unlocks the screen.
             label: label.to_string(),
         }),
         15 => Err(Error::KeychainNoWindowServer {
             // SE_ERR_KEYCHAIN_NO_WINDOW_SERVER: macOS returned
-            // errSecInteractionRequired (-25308) and CGSessionCopyCurrentDictionary()
+            // errSecInteractionNotAllowed (-25308) and CGSessionCopyCurrentDictionary()
             // returned nil — the process has no window server connection.
             // Touch ID UI cannot be displayed. Recovery: restart the agent
             // via launchd so it inherits the user's GUI session.
@@ -542,6 +548,12 @@ pub fn generate_and_wrap(
 /// Returns `Ok(None)` if no wrapping-key entry exists — the caller can
 /// distinguish that from a decrypt/IO error.
 ///
+/// When `use_user_presence` is `Some(bool)` and the wrapping key was
+/// freshly loaded from the keychain (not served from the in-process
+/// cache), the item is re-stored to migrate it to the current data
+/// protection class (`AfterFirstUnlockThisDeviceOnly`). This is a
+/// one-time transparent upgrade for items created before the fix.
+///
 /// Raw wrapping-key bytes are fetched, used, and dropped inside this
 /// function — they do not escape `keychain_wrap`.
 pub fn decrypt_with_cached_key(
@@ -551,9 +563,24 @@ pub fn decrypt_with_cached_key(
     cache_ttl: Duration,
     access_group: Option<&str>,
     lacontext_token: u64,
+    use_user_presence: Option<bool>,
 ) -> Result<Option<Vec<u8>>> {
+    let was_cached = cache_lookup(app_name, label, cache_ttl).is_some();
     match keychain_load(app_name, label, cache_ttl, access_group, lacontext_token)? {
         Some(wrapping_key) => {
+            if !was_cached {
+                if let Some(up) = use_user_presence {
+                    if let Err(e) = keychain_store(app_name, label, &wrapping_key, up, access_group)
+                    {
+                        tracing::warn!(
+                            label = label,
+                            error = %e,
+                            "protection-class migration re-store failed; \
+                             item retains old protection class until next successful load"
+                        );
+                    }
+                }
+            }
             let plaintext = decrypt_blob(&wrapping_key, blob)?;
             Ok(Some(plaintext))
         }
