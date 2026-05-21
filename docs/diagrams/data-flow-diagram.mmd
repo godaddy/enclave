@@ -1,0 +1,73 @@
+flowchart LR
+    app["External entity\nConsuming enclave app"]
+
+    subgraph process["Trust boundary: consuming process"]
+        harden["process hardening\ncalled before secret use"]
+        appstorage["enclaveapp-app-storage\nbackend selection"]
+        core["enclaveapp-core\ntraits, metadata, crypto helpers"]
+        adapter["enclaveapp-app-adapter\noptional delivery layer"]
+        cache["enclaveapp-cache\noptional cache envelope"]
+    end
+
+    subgraph disk["Trust boundary: local user-writable disk"]
+        ciphertext["Credential ciphertext / cache file"]
+        counter["Rollback counter sidecar"]
+        meta["Key metadata\n<label>.meta"]
+        handle["Key handle / wrapped key file"]
+        publickey["Public key cache"]
+    end
+
+    subgraph securestore["Trust boundary: platform secure storage"]
+        se["macOS Secure Enclave + Keychain"]
+        win["Windows TPM / CNG / WebAuthn"]
+        linuxtpm["Linux TPM"]
+        keyring["Linux Secret Service / keyring"]
+        metatag["Metadata HMAC tag store"]
+    end
+
+    subgraph wsl["Trust boundary: WSL bridge path"]
+        bridgeclient["enclaveapp-bridge client"]
+        bridgeserver["Windows bridge child process\nenclaveapp-tpm-bridge"]
+    end
+
+    app -->|"generate/sign/encrypt/decrypt request"| harden
+    harden --> appstorage
+    appstorage -->|"validate labels and policy"| core
+    appstorage -->|"optional adapter launch/secret delivery"| adapter
+    appstorage -->|"optional cache header binding"| cache
+
+    appstorage -->|"read/write ciphertext"| ciphertext
+    cache -->|"read/write monotonic counter"| counter
+    core -->|"read/write metadata"| meta
+    core -->|"read/write public key cache"| publickey
+    appstorage -->|"read/write handle or wrapped key"| handle
+
+    appstorage -->|"platform operation"| se
+    appstorage -->|"platform operation"| win
+    appstorage -->|"platform operation"| linuxtpm
+    appstorage -->|"software/keyring operation"| keyring
+    core -->|"verify metadata tag"| metatag
+
+    appstorage -->|"WSL TPM request"| bridgeclient
+    bridgeclient -->|"bounded JSON-RPC over stdio"| bridgeserver
+    bridgeserver -->|"Windows TPM operation"| win
+
+    se -->|"signature / ECDH result"| appstorage
+    win -->|"signature / ECDH result"| appstorage
+    linuxtpm -->|"signature / ECDH result"| appstorage
+    keyring -->|"software signature / decrypted key"| appstorage
+    appstorage -->|"plaintext secret or signature"| app
+
+    classDef external fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef processclass fill:#ecfeff,stroke:#0891b2,color:#164e63;
+    classDef datastore fill:#fff7ed,stroke:#f97316,color:#7c2d12;
+    classDef secure fill:#f0fdf4,stroke:#16a34a,color:#14532d;
+    classDef trust fill:#f8fafc,stroke:#64748b,color:#0f172a;
+    classDef weak fill:#fef2f2,stroke:#dc2626,color:#7f1d1d;
+
+    class app external;
+    class harden,appstorage,core,adapter,cache,bridgeclient,bridgeserver processclass;
+    class ciphertext,counter,meta,handle,publickey datastore;
+    class se,win,linuxtpm,metatag secure;
+    class keyring weak;
+    class process,disk,securestore,wsl trust;

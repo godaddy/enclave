@@ -12,6 +12,12 @@ shown only as examples of callers into the shared library.
 
 - [`workspace-context.mmd`](workspace-context.mmd): crate boundaries and how
   consuming enclave apps depend on shared library layers.
+- [`architecture.png`](architecture.png): rendered draw.io architecture diagram
+  with embedded source, suitable for Security review artifacts and Confluence
+  linking.
+- [`data-flow-diagram.mmd`](data-flow-diagram.mmd): Confluence threat-model
+  DFD showing consuming apps, library components, data stores, platform secure
+  storage, WSL bridge, and trust boundaries.
 - [`app-storage-backend-selection.mmd`](app-storage-backend-selection.mmd):
   `enclaveapp-app-storage` platform detection and backend dispatch.
 - [`encryption-flow.mmd`](encryption-flow.mmd): application encrypt/decrypt
@@ -32,4 +38,3 @@ Example with Mermaid CLI:
 ```sh
 mmdc -i docs/diagrams/workspace-context.mmd -o workspace-context.svg
 ```
-
