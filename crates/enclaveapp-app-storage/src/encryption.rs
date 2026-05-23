@@ -79,7 +79,8 @@ impl AppEncryptionStorage {
     /// 5. If yes, checks that the existing key's policy matches;
     ///    on mismatch, re-generates (encryption keys protect temporary cached data)
     #[allow(clippy::needless_return, unreachable_code)]
-    pub fn init(config: StorageConfig) -> Result<Self> {
+    pub fn init(mut config: StorageConfig) -> Result<Self> {
+        config.app_name = enclaveapp_core::signing::ensure_safe_app_name(&config.app_name);
         #[cfg(target_os = "macos")]
         {
             return Self::init_macos(&config);

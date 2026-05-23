@@ -45,7 +45,8 @@ use zeroize::Zeroize;
 pub const META_TAG_LEN: usize = 32;
 
 fn service_name_for(app_name: &str) -> String {
-    format!("com.godaddy.{app_name}.meta-tag")
+    let safe = crate::signing::ensure_safe_app_name(app_name);
+    format!("com.godaddy.{safe}.meta-tag")
 }
 
 /// Outcome of a meta-integrity verification against the on-disk
@@ -323,13 +324,23 @@ mod tests {
 
     #[test]
     fn service_name_format() {
-        assert_eq!(service_name_for("sshenc"), "com.godaddy.sshenc.meta-tag");
-        assert_eq!(service_name_for("awsenc"), "com.godaddy.awsenc.meta-tag");
+        // Tests run from /target/ so ensure_safe_app_name appends -unsigned.
+        assert_eq!(
+            service_name_for("sshenc"),
+            "com.godaddy.sshenc-unsigned.meta-tag"
+        );
+        assert_eq!(
+            service_name_for("awsenc"),
+            "com.godaddy.awsenc-unsigned.meta-tag"
+        );
     }
 
     #[test]
     fn service_name_for_npmenc() {
-        assert_eq!(service_name_for("npmenc"), "com.godaddy.npmenc.meta-tag");
+        assert_eq!(
+            service_name_for("npmenc"),
+            "com.godaddy.npmenc-unsigned.meta-tag"
+        );
     }
 
     #[test]
