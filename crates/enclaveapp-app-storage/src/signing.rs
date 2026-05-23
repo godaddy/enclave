@@ -141,7 +141,8 @@ impl AppSigningBackend {
     /// Initialize signing backend with automatic platform detection.
     /// Does NOT generate keys — the consumer app manages key lifecycle.
     #[allow(clippy::needless_return, unreachable_code)]
-    pub fn init(config: StorageConfig) -> Result<Self> {
+    pub fn init(mut config: StorageConfig) -> Result<Self> {
+        config.app_name = enclaveapp_core::signing::ensure_safe_app_name(&config.app_name);
         #[cfg(target_os = "macos")]
         {
             return Self::init_macos(&config);

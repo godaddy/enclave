@@ -63,7 +63,7 @@ pub struct KeychainConfig {
 impl KeychainConfig {
     pub fn new(app_name: &str) -> Self {
         KeychainConfig {
-            app_name: app_name.to_string(),
+            app_name: crate::signing::ensure_safe_app_name(app_name),
             keys_dir_override: None,
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
@@ -74,7 +74,7 @@ impl KeychainConfig {
     /// Create a config with a custom keys directory path.
     pub fn with_keys_dir(app_name: &str, keys_dir: PathBuf) -> Self {
         KeychainConfig {
-            app_name: app_name.to_string(),
+            app_name: crate::signing::ensure_safe_app_name(app_name),
             keys_dir_override: Some(keys_dir),
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
@@ -1066,14 +1066,15 @@ mod tests {
     #[test]
     fn keychain_config_new_sets_app_name() {
         let config = KeychainConfig::new("sshenc");
-        assert_eq!(config.app_name, "sshenc");
+        // Tests run from /target/ → ensure_safe_app_name appends -unsigned
+        assert_eq!(config.app_name, "sshenc-unsigned");
         assert!(config.keys_dir_override.is_none());
     }
 
     #[test]
     fn keychain_config_new_different_app_name() {
         let config = KeychainConfig::new("awsenc");
-        assert_eq!(config.app_name, "awsenc");
+        assert_eq!(config.app_name, "awsenc-unsigned");
     }
 
     #[test]
@@ -1110,7 +1111,7 @@ mod tests {
     fn keychain_config_with_keys_dir_overrides_path() {
         let custom = PathBuf::from("/tmp/custom-keys");
         let config = KeychainConfig::with_keys_dir("sshenc", custom.clone());
-        assert_eq!(config.app_name, "sshenc");
+        assert_eq!(config.app_name, "sshenc-unsigned");
         assert_eq!(config.keys_dir_override, Some(custom));
     }
 
@@ -1118,8 +1119,8 @@ mod tests {
     fn keys_dir_returns_default_when_no_override() {
         let config = KeychainConfig::new("test-app");
         let dir = config.keys_dir();
-        // Should use the platform default from metadata::keys_dir
-        let expected = metadata::keys_dir("test-app");
+        // ensure_safe_app_name rewrites "test-app" → "test-app-unsigned"
+        let expected = metadata::keys_dir("test-app-unsigned");
         assert_eq!(dir, expected);
     }
 

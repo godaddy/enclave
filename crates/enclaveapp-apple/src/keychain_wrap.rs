@@ -172,7 +172,8 @@ pub(crate) fn decrypt_blob(wrapping_key: &[u8; WRAP_KEY_LEN], blob: &[u8]) -> Re
 /// given app. The account is the key `<label>` so every key gets its own
 /// wrapping-key entry.
 pub fn service_name_for(app_name: &str) -> String {
-    format!("com.godaddy.{app_name}")
+    let safe = crate::signing::ensure_safe_app_name(app_name);
+    format!("com.godaddy.{safe}")
 }
 
 // -----------------------------------------------------------------------
@@ -901,8 +902,15 @@ mod tests {
 
     #[test]
     fn service_name_matches_expected_format() {
-        assert_eq!(service_name_for("sshenc"), "com.godaddy.sshenc");
-        assert_eq!(service_name_for("awsenc"), "com.godaddy.awsenc");
+        // Tests run from /target/ so is_binary_signed() == false;
+        // ensure_safe_app_name appends -unsigned.
+        assert_eq!(service_name_for("sshenc"), "com.godaddy.sshenc-unsigned");
+        assert_eq!(service_name_for("awsenc"), "com.godaddy.awsenc-unsigned");
+        // Already-suffixed names are not doubled.
+        assert_eq!(
+            service_name_for("sshenc-unsigned"),
+            "com.godaddy.sshenc-unsigned"
+        );
     }
 
     // ───── Process-local cache invariants ─────

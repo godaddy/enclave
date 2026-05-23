@@ -231,7 +231,8 @@ pub const MOCK_STORAGE_ENV: &str = "ENCLAVEAPP_MOCK_STORAGE";
 /// so this function unconditionally returns the real backend —
 /// there is no runtime switch that could downgrade production
 /// security.
-pub fn create_encryption_storage(config: StorageConfig) -> Result<Box<dyn EncryptionStorage>> {
+pub fn create_encryption_storage(mut config: StorageConfig) -> Result<Box<dyn EncryptionStorage>> {
+    config.app_name = enclaveapp_core::signing::ensure_safe_app_name(&config.app_name);
     #[cfg(feature = "mock")]
     {
         if let Ok(val) = std::env::var(MOCK_STORAGE_ENV) {

@@ -82,7 +82,8 @@ const META_HMAC_ACCOUNT: &str = "__meta_hmac_key__";
 /// (`com.godaddy.<app>`) so the legacy-Keychain ACL on the wrapping
 /// keys and the meta-HMAC key are separate decisions.
 fn service_name_for(app_name: &str) -> String {
-    format!("com.godaddy.{app_name}.meta-hmac")
+    let safe = crate::signing::ensure_safe_app_name(app_name);
+    format!("com.godaddy.{safe}.meta-hmac")
 }
 
 /// Load the per-app meta-HMAC key from the legacy macOS Keychain
@@ -344,13 +345,23 @@ mod tests {
 
     #[test]
     fn service_name_includes_app_and_suffix() {
-        assert_eq!(service_name_for("sshenc"), "com.godaddy.sshenc.meta-hmac");
-        assert_eq!(service_name_for("awsenc"), "com.godaddy.awsenc.meta-hmac");
+        // Tests run from /target/ so ensure_safe_app_name appends -unsigned.
+        assert_eq!(
+            service_name_for("sshenc"),
+            "com.godaddy.sshenc-unsigned.meta-hmac"
+        );
+        assert_eq!(
+            service_name_for("awsenc"),
+            "com.godaddy.awsenc-unsigned.meta-hmac"
+        );
     }
 
     #[test]
     fn service_name_for_npmenc() {
-        assert_eq!(service_name_for("npmenc"), "com.godaddy.npmenc.meta-hmac");
+        assert_eq!(
+            service_name_for("npmenc"),
+            "com.godaddy.npmenc-unsigned.meta-hmac"
+        );
     }
 
     #[test]
