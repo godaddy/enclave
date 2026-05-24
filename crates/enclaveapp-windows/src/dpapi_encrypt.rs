@@ -425,7 +425,7 @@ fn app_key_unwrap(data: &[u8], ak: &[u8; 32]) -> Result<Zeroizing<Vec<u8>>> {
             })?;
     let nonce = Nonce::from(nonce_arr);
     let plaintext = cipher
-        .decrypt(nonce, &data[GCM_NONCE_SIZE..])
+        .decrypt(&nonce, &data[GCM_NONCE_SIZE..])
         .map_err(|e| Error::DecryptFailed {
             detail: format!("app key AES-GCM decrypt: {e}"),
         })?;
@@ -462,8 +462,8 @@ mod tests {
 
     #[test]
     fn app_key_wrap_unwrap_roundtrip() {
-        let raw_key = [42u8; RAW_KEY_SIZE];
-        let ak = [0xABu8; 32];
+        let raw_key = [42_u8; RAW_KEY_SIZE];
+        let ak = [0xAB_u8; 32];
         let wrapped = app_key_wrap(&raw_key, &ak).unwrap();
         assert_eq!(wrapped.len(), WRAPPED_KEY_SIZE);
         assert!(wrapped.starts_with(&APP_KEY_MAGIC));
@@ -473,8 +473,8 @@ mod tests {
 
     #[test]
     fn app_key_wrap_produces_different_ciphertexts_each_time() {
-        let raw_key = [1u8; RAW_KEY_SIZE];
-        let ak = [2u8; 32];
+        let raw_key = [1_u8; RAW_KEY_SIZE];
+        let ak = [2_u8; 32];
         let w1 = app_key_wrap(&raw_key, &ak).unwrap();
         let w2 = app_key_wrap(&raw_key, &ak).unwrap();
         // Nonces are random — ciphertexts must differ.
@@ -483,18 +483,18 @@ mod tests {
 
     #[test]
     fn app_key_unwrap_wrong_key_fails() {
-        let raw_key = [42u8; RAW_KEY_SIZE];
-        let ak = [0xABu8; 32];
-        let wrong_ak = [0xCDu8; 32];
+        let raw_key = [42_u8; RAW_KEY_SIZE];
+        let ak = [0xAB_u8; 32];
+        let wrong_ak = [0xCD_u8; 32];
         let wrapped = app_key_wrap(&raw_key, &ak).unwrap();
         assert!(app_key_unwrap(&wrapped[APP_KEY_MAGIC.len()..], &wrong_ak).is_err());
     }
 
     #[test]
     fn app_key_unwrap_truncated_data_fails() {
-        let ak = [0xABu8; 32];
+        let ak = [0xAB_u8; 32];
         // Too short: only a nonce, no ciphertext.
-        let truncated = [0u8; GCM_NONCE_SIZE];
+        let truncated = [0_u8; GCM_NONCE_SIZE];
         assert!(app_key_unwrap(&truncated, &ak).is_err());
     }
 
