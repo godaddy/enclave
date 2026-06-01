@@ -335,6 +335,7 @@ dependencies = [
 name = "enclave"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "enclaveapp-app-adapter",
  "enclaveapp-app-storage",
  "enclaveapp-apple",
@@ -344,6 +345,7 @@ dependencies = [
  "enclaveapp-wsl",
  "libc",
  "rand",
+ "sha2",
  "thiserror",
  "tracing",
  "windows",

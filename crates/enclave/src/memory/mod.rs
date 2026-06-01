@@ -3,11 +3,14 @@
 
 //! Page-guarded, mlock'd memory buffers for secret material.
 
+mod coffer;
 mod locked_buffer;
 mod memcall;
+mod memory_enclave;
 mod secure_buffer;
 
 pub use locked_buffer::LockedBuffer;
+pub use memory_enclave::MemoryEnclave;
 pub use secure_buffer::SecureBuffer;
 
 /// Zeroize and remove all registered LockedBuffers. Call at shutdown.
