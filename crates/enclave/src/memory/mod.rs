@@ -1,0 +1,16 @@
+// Copyright 2026 Jay Gowdy
+// SPDX-License-Identifier: MIT
+
+//! Page-guarded, mlock'd memory buffers for secret material.
+
+mod locked_buffer;
+mod memcall;
+mod secure_buffer;
+
+pub use locked_buffer::LockedBuffer;
+pub use secure_buffer::SecureBuffer;
+
+/// Zeroize and remove all registered LockedBuffers. Call at shutdown.
+pub fn zeroize_all() {
+    locked_buffer::zeroize_all_registered();
+}

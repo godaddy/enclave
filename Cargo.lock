@@ -332,6 +332,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclave"
+version = "0.1.0"
+dependencies = [
+ "enclaveapp-app-adapter",
+ "enclaveapp-app-storage",
+ "enclaveapp-apple",
+ "enclaveapp-core",
+ "enclaveapp-keyring",
+ "enclaveapp-windows",
+ "enclaveapp-wsl",
+ "libc",
+ "rand",
+ "thiserror",
+ "tracing",
+ "windows",
+ "zeroize",
+]
+
+[[package]]
 name = "enclaveapp-app-adapter"
 version = "0.1.0"
 dependencies = [
