@@ -29,7 +29,7 @@
 //! let signer = create_signer(&config)?;
 //! let pubkey = signer.generate_key("default", AccessPolicy::Any)?;
 //! let sig = signer.sign("default", b"hello world")?;
-//! # Ok::<(), enclave::Error>(())
+//! # Ok::<(), hardware_enclave::Error>(())
 //! ```
 //!
 //! # Memory pool initialization
