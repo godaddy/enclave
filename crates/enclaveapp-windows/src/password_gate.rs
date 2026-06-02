@@ -9,8 +9,26 @@
 //! enrolled (`DeviceNotPresent` / `NotConfiguredForUser` /
 //! `DisabledByPolicy`) it falls back to this module, which prompts for
 //! the current user's Windows credentials via
-//! `CredUIPromptForWindowsCredentialsW` and validates them with
-//! `LogonUserW(LOGON32_LOGON_NETWORK)`.
+//! `CredUIPromptForWindowsCredentialsW` and validates them with an
+//! **SSPI NTLM loopback** handshake.
+//!
+//! ## Why SSPI loopback and not `LogonUserW`
+//!
+//! `LogonUserW` (any logon type) validates against the local SAM or
+//! cached *domain* credentials. On Entra ID (Azure AD)-joined machines —
+//! the common corporate case — the account is a cloud account with no
+//! local/domain secret, so `LogonUserW` returns `ERROR_LOGON_FAILURE`
+//! even for the **correct** password. That made the gate reject every
+//! password (the bug behind this rewrite).
+//!
+//! Instead we drive a loopback NTLM handshake against the local SSP:
+//! acquire an *outbound* credential from the typed username/password and
+//! an *inbound* credential for the same package, then exchange security
+//! contexts (`InitializeSecurityContextW` ↔ `AcceptSecurityContext`)
+//! until `AcceptSecurityContext` returns `SEC_E_OK` (password matches the
+//! cached MSV/NTLM verifier) or `SEC_E_LOGON_DENIED` (wrong password).
+//! Because Windows caches an MSV1_0 verifier for Entra password sign-in,
+//! this validates local, AD-domain, **and** Entra accounts.
 //!
 //! ## Why this exists
 //!
@@ -24,22 +42,23 @@
 //!
 //! Identical posture to [`crate::hello_gate`]: this is a **soft gate**.
 //! The verification is a Boolean computed in the calling process; a
-//! same-UID attacker with code execution can hook `LogonUserW`'s result
-//! or invoke the TPM key operation directly. It is a user-presence
-//! consent signal, not a hard cryptographic boundary against same-UID
-//! malware. The plaintext password lives in process memory only for the
-//! duration of the `LogonUserW` call and is zeroized immediately after.
+//! same-UID attacker with code execution can hook the result or invoke
+//! the TPM key operation directly. It is a user-presence consent signal,
+//! not a hard cryptographic boundary against same-UID malware. The
+//! plaintext password lives in process memory only for the SSPI handshake
+//! and is zeroized immediately after.
 //!
 //! ## Outcomes
 //!
 //! [`verify_current_user`] returns a [`PresenceOutcome`]:
 //! - [`PresenceOutcome::Verified`] — the user proved presence; proceed.
-//! - [`PresenceOutcome::Denied`] — the user cancelled or exhausted
-//!   retries; the caller treats this as access denied.
+//! - [`PresenceOutcome::Denied`] — the user cancelled or entered a wrong
+//!   password too many times; the caller treats this as access denied.
 //! - [`PresenceOutcome::Unavailable`] — no prompt could be shown or the
-//!   account cannot be validated this way (headless session, API
-//!   failure, passwordless/unsupported account). The caller degrades to
-//!   no presence prompt; the credential bundle remains TPM-encrypted.
+//!   credential could not be validated *at all* (headless session, SSPI
+//!   package unavailable, NTLM disabled by policy). The caller degrades
+//!   to no presence prompt; the credential bundle remains TPM-encrypted.
+//!   Note a *wrong password* is `Denied`, not `Unavailable`.
 
 #![allow(unsafe_code)]
 
@@ -48,15 +67,28 @@ use std::mem::size_of;
 use std::ptr::{null, null_mut};
 
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+use windows::Win32::Foundation::{HWND, SEC_E_LOGON_DENIED, SEC_E_OK, SEC_I_CONTINUE_NEEDED};
 use windows::Win32::Graphics::Gdi::HBITMAP;
+use windows::Win32::Security::Authentication::Identity::{
+    AcceptSecurityContext, AcquireCredentialsHandleW, DeleteSecurityContext, FreeContextBuffer,
+    FreeCredentialsHandle, InitializeSecurityContextW, SecBuffer, SecBufferDesc,
+    ASC_REQ_ALLOCATE_MEMORY, ASC_REQ_CONNECTION, ISC_REQ_ALLOCATE_MEMORY, ISC_REQ_CONNECTION,
+    SECBUFFER_TOKEN, SECBUFFER_VERSION, SECPKG_CRED_INBOUND, SECPKG_CRED_OUTBOUND,
+    SECURITY_NATIVE_DREP,
+};
 use windows::Win32::Security::Credentials::{
-    CredUIPromptForWindowsCredentialsW, CredUnPackAuthenticationBufferW,
+    CredUIPromptForWindowsCredentialsW, CredUnPackAuthenticationBufferW, SecHandle,
     CREDUIWIN_ENUMERATE_CURRENT_USER, CREDUI_INFOW, CRED_PACK_FLAGS,
 };
-use windows::Win32::Security::{LogonUserW, LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT};
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Rpc::{SEC_WINNT_AUTH_IDENTITY_UNICODE, SEC_WINNT_AUTH_IDENTITY_W};
 use zeroize::Zeroize;
+
+/// SSPI package used for the loopback validation. NTLM (rather than
+/// Negotiate) forces the MSV1_0 path that checks the typed password
+/// against the locally cached credential verifier — the only leg that
+/// works offline and for Entra cloud accounts.
+const NTLM_PACKAGE: &[u16] = &[b'N' as u16, b'T' as u16, b'L' as u16, b'M' as u16, 0];
 
 /// Result of a Windows password presence check.
 #[derive(Debug)]
@@ -78,9 +110,9 @@ const ERROR_SUCCESS_CODE: u32 = 0;
 /// The user dismissed the credential dialog.
 const ERROR_CANCELLED_CODE: u32 = 1223; // ERROR_CANCELLED
 /// Win32 `ERROR_LOGON_FAILURE`; passed back to the dialog as `dwAuthError`
-/// so a re-prompt shows the "the password is incorrect" hint, and used to
-/// distinguish a wrong password (retry) from an unvalidatable account
-/// (degrade).
+/// on a re-prompt so it shows the "the password is incorrect" hint. The
+/// wrong-vs-unvalidatable distinction is made by the SSPI handshake, not
+/// this code.
 const ERROR_LOGON_FAILURE_CODE: u32 = 1326;
 /// How many times to re-prompt on a wrong password before denying.
 const MAX_ATTEMPTS: u32 = 3;
@@ -178,8 +210,8 @@ enum AuthCheck {
 }
 
 /// Unpack the credential blob from `CredUIPromptForWindowsCredentialsW`
-/// and validate it with a network logon. All secret buffers are zeroized
-/// before return.
+/// and validate it via an SSPI NTLM loopback handshake. All secret
+/// buffers are zeroized before return.
 unsafe fn verify_auth_buffer(buf: *mut core::ffi::c_void, size: u32) -> AuthCheck {
     if buf.is_null() || size == 0 {
         return AuthCheck::Unavailable("empty credential buffer".into());
@@ -231,49 +263,285 @@ unsafe fn verify_auth_buffer(buf: *mut core::ffi::c_void, size: u32) -> AuthChec
         return AuthCheck::Unavailable("could not unpack credentials".into());
     }
 
-    // UPN-form usernames (user@domain) carry the whole identity in the
-    // username field with an empty domain; pass NULL domain in that case.
-    let domain_ptr = if domain_len > 1 && domain[0] != 0 {
-        PCWSTR(domain.as_ptr())
-    } else {
-        PCWSTR(null())
-    };
-
-    let mut token = HANDLE::default();
-    let logon = LogonUserW(
-        PCWSTR(user.as_ptr()),
-        domain_ptr,
-        PCWSTR(password.as_ptr()),
-        LOGON32_LOGON_NETWORK,
-        LOGON32_PROVIDER_DEFAULT,
-        &mut token,
-    );
+    let outcome = validate_via_sspi(&mut user, &mut domain, &mut password);
 
     // Scrub secrets the instant they are no longer needed.
     user.zeroize();
     domain.zeroize();
     password.zeroize();
 
-    match logon {
-        Ok(()) => {
-            if !token.is_invalid() {
-                drop(CloseHandle(token));
-            }
-            AuthCheck::Verified
-        }
-        Err(err) => {
-            // HRESULT_FROM_WIN32 packs the Win32 code in the low 16 bits.
-            let win32 = (err.code().0 as u32) & 0xFFFF;
-            if win32 == ERROR_LOGON_FAILURE_CODE {
-                AuthCheck::WrongPassword
-            } else {
-                // The account cannot be validated via LogonUser on this
-                // host (e.g. network-logon right denied, passwordless
-                // account). Degrade rather than lock the user out.
-                AuthCheck::Unavailable(format!("LogonUserW could not validate the account: {err}"))
-            }
-        }
+    outcome
+}
+
+/// Number of `u16` code units before the first NUL (the character length
+/// SSPI expects, excluding the terminator).
+fn wlen(buf: &[u16]) -> u32 {
+    buf.iter().position(|&c| c == 0).unwrap_or(buf.len()) as u32
+}
+
+/// Validate `user`/`domain`/`password` via an NTLM loopback handshake
+/// against the local SSP. See the module docs for why this is used
+/// instead of `LogonUserW`. Returns `WrongPassword` only on a definitive
+/// `SEC_E_LOGON_DENIED`; any inability to run the handshake is
+/// `Unavailable` (degrade) rather than a false rejection.
+unsafe fn validate_via_sspi(
+    user: &mut [u16],
+    domain: &mut [u16],
+    password: &mut [u16],
+) -> AuthCheck {
+    let user_len = wlen(user);
+    let pass_len = wlen(password);
+    let domain_len = wlen(domain);
+    let (domain_ptr, domain_chars) = if domain_len > 0 {
+        (domain.as_mut_ptr(), domain_len)
+    } else {
+        (null_mut(), 0)
+    };
+
+    let identity = SEC_WINNT_AUTH_IDENTITY_W {
+        User: user.as_mut_ptr(),
+        UserLength: user_len,
+        Domain: domain_ptr,
+        DomainLength: domain_chars,
+        Password: password.as_mut_ptr(),
+        PasswordLength: pass_len,
+        Flags: SEC_WINNT_AUTH_IDENTITY_UNICODE,
+    };
+
+    let package = PCWSTR(NTLM_PACKAGE.as_ptr());
+    let mut ts: i64 = 0;
+    let id_ptr: *const SEC_WINNT_AUTH_IDENTITY_W = &identity;
+
+    // Outbound (client) credential built from the typed identity.
+    let mut client_cred = SecHandle::default();
+    if AcquireCredentialsHandleW(
+        PCWSTR(null()),
+        package,
+        SECPKG_CRED_OUTBOUND,
+        None,
+        Some(id_ptr.cast()),
+        None,
+        None,
+        &mut client_cred,
+        Some(&mut ts),
+    )
+    .is_err()
+    {
+        return AuthCheck::Unavailable("AcquireCredentialsHandle(outbound) failed".into());
     }
+
+    // Inbound (server) credential for the same package; no identity — it
+    // validates the client's response against the locally cached verifier.
+    let mut server_cred = SecHandle::default();
+    if AcquireCredentialsHandleW(
+        PCWSTR(null()),
+        package,
+        SECPKG_CRED_INBOUND,
+        None,
+        None,
+        None,
+        None,
+        &mut server_cred,
+        Some(&mut ts),
+    )
+    .is_err()
+    {
+        drop(FreeCredentialsHandle(&client_cred));
+        return AuthCheck::Unavailable("AcquireCredentialsHandle(inbound) failed".into());
+    }
+
+    let result = run_loopback(&client_cred, &server_cred, &mut ts);
+
+    drop(FreeCredentialsHandle(&client_cred));
+    drop(FreeCredentialsHandle(&server_cred));
+    result
+}
+
+/// Drive the client↔server SSPI token exchange to completion. Each
+/// iteration runs one `InitializeSecurityContextW` (client) leg then one
+/// `AcceptSecurityContext` (server) leg; the server's verdict
+/// (`SEC_E_OK` / `SEC_E_LOGON_DENIED`) ends the loop. SSP-allocated
+/// output tokens are released with `FreeContextBuffer`.
+unsafe fn run_loopback(
+    client_cred: &SecHandle,
+    server_cred: &SecHandle,
+    ts: &mut i64,
+) -> AuthCheck {
+    let mut client_ctx = SecHandle::default();
+    let mut server_ctx = SecHandle::default();
+    let mut have_client_ctx = false;
+    let mut have_server_ctx = false;
+
+    // Token most recently produced by the server, fed into the next ISC.
+    let mut server_token: *mut core::ffi::c_void = null_mut();
+    let mut server_token_len: u32 = 0;
+
+    let mut attr: u32 = 0;
+    let outcome;
+
+    loop {
+        // ---- client: InitializeSecurityContext ----
+        let mut out_client = SecBuffer {
+            cbBuffer: 0,
+            BufferType: SECBUFFER_TOKEN,
+            pvBuffer: null_mut(),
+        };
+        let mut out_client_desc = SecBufferDesc {
+            ulVersion: SECBUFFER_VERSION,
+            cBuffers: 1,
+            pBuffers: &mut out_client,
+        };
+        let mut in_client = SecBuffer {
+            cbBuffer: server_token_len,
+            BufferType: SECBUFFER_TOKEN,
+            pvBuffer: server_token,
+        };
+        let in_client_desc = SecBufferDesc {
+            ulVersion: SECBUFFER_VERSION,
+            cBuffers: 1,
+            pBuffers: &mut in_client,
+        };
+        let p_in_client: Option<*const SecBufferDesc> = if server_token.is_null() {
+            None
+        } else {
+            let p: *const SecBufferDesc = &in_client_desc;
+            Some(p)
+        };
+        let p_client_ctx: Option<*const SecHandle> = if have_client_ctx {
+            let p: *const SecHandle = &client_ctx;
+            Some(p)
+        } else {
+            None
+        };
+
+        let st_isc = InitializeSecurityContextW(
+            Some(client_cred),
+            p_client_ctx,
+            None,
+            ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_CONNECTION,
+            0,
+            SECURITY_NATIVE_DREP,
+            p_in_client,
+            0,
+            Some(&mut client_ctx),
+            Some(&mut out_client_desc),
+            &mut attr,
+            Some(ts),
+        );
+        have_client_ctx = true;
+
+        // The server token has been consumed by this ISC; release it.
+        if !server_token.is_null() {
+            drop(FreeContextBuffer(server_token));
+            server_token = null_mut();
+            // server_token_len is paired with the pointer and is always
+            // re-set before its next read; no reset needed here.
+        }
+
+        if st_isc != SEC_E_OK && st_isc != SEC_I_CONTINUE_NEEDED {
+            if !out_client.pvBuffer.is_null() {
+                drop(FreeContextBuffer(out_client.pvBuffer));
+            }
+            outcome = AuthCheck::Unavailable(format!(
+                "InitializeSecurityContext failed (0x{:08X})",
+                st_isc.0 as u32
+            ));
+            break;
+        }
+
+        // ---- server: AcceptSecurityContext (consume the client token) ----
+        let mut out_server = SecBuffer {
+            cbBuffer: 0,
+            BufferType: SECBUFFER_TOKEN,
+            pvBuffer: null_mut(),
+        };
+        let mut out_server_desc = SecBufferDesc {
+            ulVersion: SECBUFFER_VERSION,
+            cBuffers: 1,
+            pBuffers: &mut out_server,
+        };
+        let mut in_server = SecBuffer {
+            cbBuffer: out_client.cbBuffer,
+            BufferType: SECBUFFER_TOKEN,
+            pvBuffer: out_client.pvBuffer,
+        };
+        let in_server_desc = SecBufferDesc {
+            ulVersion: SECBUFFER_VERSION,
+            cBuffers: 1,
+            pBuffers: &mut in_server,
+        };
+        let p_in_server: Option<*const SecBufferDesc> = if out_client.pvBuffer.is_null() {
+            None
+        } else {
+            let p: *const SecBufferDesc = &in_server_desc;
+            Some(p)
+        };
+        let p_server_ctx: Option<*const SecHandle> = if have_server_ctx {
+            let p: *const SecHandle = &server_ctx;
+            Some(p)
+        } else {
+            None
+        };
+
+        let st_asc = AcceptSecurityContext(
+            Some(server_cred),
+            p_server_ctx,
+            p_in_server,
+            ASC_REQ_ALLOCATE_MEMORY | ASC_REQ_CONNECTION,
+            SECURITY_NATIVE_DREP,
+            Some(&mut server_ctx),
+            Some(&mut out_server_desc),
+            &mut attr,
+            Some(ts),
+        );
+        have_server_ctx = true;
+
+        // The client token has now been consumed by the server; release it.
+        if !out_client.pvBuffer.is_null() {
+            drop(FreeContextBuffer(out_client.pvBuffer));
+        }
+
+        if st_asc == SEC_E_OK {
+            if !out_server.pvBuffer.is_null() {
+                drop(FreeContextBuffer(out_server.pvBuffer));
+            }
+            outcome = AuthCheck::Verified;
+            break;
+        }
+        if st_asc == SEC_E_LOGON_DENIED {
+            if !out_server.pvBuffer.is_null() {
+                drop(FreeContextBuffer(out_server.pvBuffer));
+            }
+            outcome = AuthCheck::WrongPassword;
+            break;
+        }
+        if st_asc != SEC_I_CONTINUE_NEEDED {
+            if !out_server.pvBuffer.is_null() {
+                drop(FreeContextBuffer(out_server.pvBuffer));
+            }
+            outcome = AuthCheck::Unavailable(format!(
+                "AcceptSecurityContext failed (0x{:08X})",
+                st_asc.0 as u32
+            ));
+            break;
+        }
+
+        // Server wants another leg: its token becomes the next ISC input.
+        server_token = out_server.pvBuffer;
+        server_token_len = out_server.cbBuffer;
+    }
+
+    if have_client_ctx {
+        drop(DeleteSecurityContext(&client_ctx));
+    }
+    if have_server_ctx {
+        drop(DeleteSecurityContext(&server_ctx));
+    }
+    if !server_token.is_null() {
+        drop(FreeContextBuffer(server_token));
+    }
+
+    outcome
 }
 
 #[cfg(test)]
