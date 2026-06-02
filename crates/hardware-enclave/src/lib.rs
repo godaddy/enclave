@@ -23,7 +23,7 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use enclave::{EnclaveConfig, create_signer, AccessPolicy};
+//! use hardware_enclave::{EnclaveConfig, create_signer, AccessPolicy};
 //!
 //! let config = EnclaveConfig::new("myapp", "default");
 //! let signer = create_signer(&config)?;

@@ -333,35 +333,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enclave"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "base64 0.22.1",
- "enclaveapp-app-adapter",
- "enclaveapp-app-storage",
- "enclaveapp-apple",
- "enclaveapp-bridge",
- "enclaveapp-core",
- "enclaveapp-keyring",
- "enclaveapp-test-software",
- "enclaveapp-windows",
- "enclaveapp-windows-webauthn",
- "enclaveapp-wsl",
- "libc",
- "p256",
- "rand",
- "sha2",
- "subtle",
- "tempfile",
- "thiserror",
- "tracing",
- "tracing-subscriber",
- "windows",
- "zeroize",
-]
-
-[[package]]
 name = "enclaveapp-app-adapter"
 version = "0.1.0"
 dependencies = [
@@ -726,6 +697,35 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "zerocopy",
+]
+
+[[package]]
+name = "hardware-enclave"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "enclaveapp-app-adapter",
+ "enclaveapp-app-storage",
+ "enclaveapp-apple",
+ "enclaveapp-bridge",
+ "enclaveapp-core",
+ "enclaveapp-keyring",
+ "enclaveapp-test-software",
+ "enclaveapp-windows",
+ "enclaveapp-windows-webauthn",
+ "enclaveapp-wsl",
+ "libc",
+ "p256",
+ "rand",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "windows",
+ "zeroize",
 ]
 
 [[package]]

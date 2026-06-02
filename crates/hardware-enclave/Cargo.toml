@@ -1,9 +1,9 @@
 [package]
-name = "enclave"
+name = "hardware-enclave"
 description = "Hardware-backed key management — macOS Secure Enclave, Windows TPM 2.0, Linux TPM/keyring"
 keywords   = ["security", "tpm", "secure-enclave", "cryptography", "memory-protection"]
 categories = ["cryptography", "os", "hardware-support"]
-documentation = "https://docs.rs/enclave"
+documentation = "https://docs.rs/hardware-enclave"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

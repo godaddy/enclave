@@ -18,7 +18,9 @@
 #![allow(clippy::print_stdout)]
 #![allow(clippy::unwrap_used)]
 
-use enclave::{coffer_view, pool_acquire, pool_release, LockedBuffer, MemoryEnclave, SecureBuffer};
+use hardware_enclave::{
+    coffer_view, pool_acquire, pool_release, LockedBuffer, MemoryEnclave, SecureBuffer,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()

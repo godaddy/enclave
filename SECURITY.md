@@ -7,7 +7,7 @@ If you discover a security vulnerability in the Enclave crate, report it private
 **Do not open a public GitHub issue for security vulnerabilities.**
 
 Email: Report via GitHub's private vulnerability reporting feature on the
-[enclave repository](https://github.com/godaddy/enclave/security/advisories/new),
+[enclave repository](https://github.com/godaddy/hardware-enclave/security/advisories/new),
 or contact the maintainer directly.
 
 Include:

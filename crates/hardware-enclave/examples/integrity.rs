@@ -29,7 +29,7 @@
 #![allow(clippy::print_stdout)]
 #![allow(clippy::unwrap_used)]
 
-use enclave::{create_tamper_evident, create_tamper_evident_ephemeral, VerifyOutcome};
+use hardware_enclave::{create_tamper_evident, create_tamper_evident_ephemeral, VerifyOutcome};
 
 /// Returns `true` when running in interactive mode with real hardware.
 ///
@@ -80,7 +80,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // ── Shared constructor ────────────────────────────────────────────────────────
 
-fn make_handle(app: &str) -> Result<enclave::TamperEvidentHandle, Box<dyn std::error::Error>> {
+fn make_handle(
+    app: &str,
+) -> Result<hardware_enclave::TamperEvidentHandle, Box<dyn std::error::Error>> {
     if interactive() {
         Ok(create_tamper_evident(app)?)
     } else {

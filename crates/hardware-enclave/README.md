@@ -43,7 +43,7 @@ signature back. Works identically on macOS (Secure Enclave), Windows (TPM),
 and Linux (TPM or keyring).
 
 ```rust
-use enclave::{create_signer, EnclaveConfig, AccessPolicy};
+use hardware_enclave::{create_signer, EnclaveConfig, AccessPolicy};
 
 let config = EnclaveConfig::new("myapp", "signing-key");
 let signer = create_signer(&config)?;
@@ -58,7 +58,7 @@ let sig: Vec<u8> = signer.sign("signing-key", data)?;
 ### With user presence (Touch ID / Windows Hello)
 
 ```rust
-use enclave::PresenceOptions;
+use hardware_enclave::PresenceOptions;
 
 // Strict: prompt on every call. Cached: reuse within TTL (macOS only).
 let sig = signer.sign_with_presence(
@@ -85,7 +85,7 @@ ECIES P-256 encryption under a hardware-backed key. Encrypted data survives
 process restart; it can only be decrypted on the same machine by the same user.
 
 ```rust
-use enclave::{create_encryptor, EnclaveConfig, AccessPolicy};
+use hardware_enclave::{create_encryptor, EnclaveConfig, AccessPolicy};
 
 let config = EnclaveConfig::new("myapp", "cache-key");
 let enc = create_encryptor(&config)?;
@@ -109,7 +109,7 @@ Generate TPM-bound FIDO2 credentials and produce `sk-ecdsa-sha2-nistp256@openssh
 SSH signatures with hardware-enforced Windows Hello confirmation.
 
 ```rust
-use enclave::{create_security_key, EnclaveConfig};
+use hardware_enclave::{create_security_key, EnclaveConfig};
 
 let sk = create_security_key(&EnclaveConfig::new("myapp", "default"));
 
@@ -136,7 +136,7 @@ need to detect undetected modification. The HMAC key lives in the platform
 secure store; files on disk remain plaintext with a `.hmac` sidecar.
 
 ```rust
-use enclave::{create_tamper_evident, VerifyOutcome};
+use hardware_enclave::{create_tamper_evident, VerifyOutcome};
 
 let handle = create_tamper_evident("myapp")?;
 
@@ -159,7 +159,7 @@ secure store — deleting the sidecar cannot bypass verification.
 **For tests and CI** (no Keychain/DPAPI access, no prompts):
 
 ```rust
-use enclave::create_tamper_evident_ephemeral;
+use hardware_enclave::create_tamper_evident_ephemeral;
 
 let handle = create_tamper_evident_ephemeral("myapp");
 ```
@@ -172,7 +172,7 @@ Acquire a standalone presence confirmation decoupled from any specific key
 operation, or evict the cached presence token to force re-authentication.
 
 ```rust
-use enclave::create_auth;
+use hardware_enclave::create_auth;
 
 let auth = create_auth(&config)?;
 let caps = auth.capabilities();
@@ -197,7 +197,7 @@ SIGSEGV. Random canaries are verified on `destroy()`. The region is mlock'd
 (no swap) and zeroized before unmapping.
 
 ```rust
-use enclave::SecureBuffer;
+use hardware_enclave::SecureBuffer;
 
 let mut buf = SecureBuffer::new(32)?;
 buf.bytes().copy_from_slice(&key_material);
@@ -213,7 +213,7 @@ call `open()`. The plaintext is returned in a guard-paged, mlock'd slot — not
 the regular heap — and is zeroed when the slot drops.
 
 ```rust
-use enclave::MemoryEnclave;
+use hardware_enclave::MemoryEnclave;
 
 let sealed = MemoryEnclave::seal(b"session-token-xyz")?;
 
@@ -225,7 +225,7 @@ let slot = sealed.open()?;
 ### Thread-safe shared buffers
 
 ```rust
-use enclave::{LockedBuffer, zeroize_all_registered_at_shutdown};
+use hardware_enclave::{LockedBuffer, zeroize_all_registered_at_shutdown};
 
 let buf = LockedBuffer::from_bytes(b"shared-secret")?;
 let copy = buf.bytes_zeroizing(); // Zeroizing<Vec<u8>>
@@ -239,7 +239,7 @@ zeroize_all_registered_at_shutdown();
 ## Configuration
 
 ```rust
-use enclave::{EnclaveConfig, PlatformConfig};
+use hardware_enclave::{EnclaveConfig, PlatformConfig};
 
 let config = EnclaveConfig::new("myapp", "default-key");
 // -unsigned is appended to app_name automatically for unsigned binaries,
@@ -249,7 +249,7 @@ let config = EnclaveConfig::new("myapp", "default-key");
 **macOS: Touch ID gate on the wrapping key (requires entitlement):**
 
 ```rust
-use enclave::{PlatformConfig, MacOsConfig};
+use hardware_enclave::{PlatformConfig, MacOsConfig};
 use std::time::Duration;
 
 PlatformConfig::MacOs(MacOsConfig {

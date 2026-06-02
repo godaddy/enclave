@@ -39,7 +39,7 @@ app-adapter secret delivery patterns.
 | Product State | In-Production |
 | Application Prod URL | N/A. Library crate consumed by local applications. |
 | Application Dev/Test URL | N/A. |
-| Source Code | https://github.com/godaddy/enclave |
+| Source Code | https://github.com/godaddy/hardware-enclave |
 | Exposure | Internal/library code; not directly externally accessible. |
 | Network zones deployed in | N/A. Runs inside consuming applications on developer workstations. |
 | People/groups with access to production servers | N/A. No production servers are operated by this repository. |
@@ -147,19 +147,19 @@ The following assumptions relate to attackers and their available resources:
 
 Relevant diagrams are maintained under:
 
-- Diagram folder: https://github.com/godaddy/enclave/tree/main/docs/diagrams
+- Diagram folder: https://github.com/godaddy/hardware-enclave/tree/main/docs/diagrams
 
 Key diagrams for review:
 
-- Architecture diagram (PNG with embedded draw.io source): https://github.com/godaddy/enclave/blob/main/docs/diagrams/architecture.png
-- Data flow diagram: https://github.com/godaddy/enclave/blob/main/docs/diagrams/data-flow-diagram.mmd
-- Workspace context: https://github.com/godaddy/enclave/blob/main/docs/diagrams/workspace-context.mmd
-- App-storage backend selection: https://github.com/godaddy/enclave/blob/main/docs/diagrams/app-storage-backend-selection.mmd
-- Encryption flow: https://github.com/godaddy/enclave/blob/main/docs/diagrams/encryption-flow.mmd
-- Signing flow: https://github.com/godaddy/enclave/blob/main/docs/diagrams/signing-flow.mmd
-- Metadata trust boundary: https://github.com/godaddy/enclave/blob/main/docs/diagrams/metadata-trust-boundary.mmd
-- WSL bridge flow: https://github.com/godaddy/enclave/blob/main/docs/diagrams/wsl-bridge-flow.mmd
-- Adapter integration types: https://github.com/godaddy/enclave/blob/main/docs/diagrams/adapter-integration-types.mmd
+- Architecture diagram (PNG with embedded draw.io source): https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/architecture.png
+- Data flow diagram: https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/data-flow-diagram.mmd
+- Workspace context: https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/workspace-context.mmd
+- App-storage backend selection: https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/app-storage-backend-selection.mmd
+- Encryption flow: https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/encryption-flow.mmd
+- Signing flow: https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/signing-flow.mmd
+- Metadata trust boundary: https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/metadata-trust-boundary.mmd
+- WSL bridge flow: https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/wsl-bridge-flow.mmd
+- Adapter integration types: https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/adapter-integration-types.mmd
 
 Architecture guidance mapping:
 
@@ -197,11 +197,11 @@ process and a Windows bridge child process.
 
 ## Data Flow Diagram
 
-Primary DFD: https://github.com/godaddy/enclave/blob/main/docs/diagrams/data-flow-diagram.mmd
+Primary DFD: https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/data-flow-diagram.mmd
 
-Encryption DFD: https://github.com/godaddy/enclave/blob/main/docs/diagrams/encryption-flow.mmd
+Encryption DFD: https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/encryption-flow.mmd
 
-Signing DFD: https://github.com/godaddy/enclave/blob/main/docs/diagrams/signing-flow.mmd
+Signing DFD: https://github.com/godaddy/hardware-enclave/blob/main/docs/diagrams/signing-flow.mmd
 
 Data processed or transmitted:
 
@@ -322,9 +322,9 @@ and device access.
 
 ## Source Code
 
-- Product repository: https://github.com/godaddy/enclave
-- Design: https://github.com/godaddy/enclave/blob/main/DESIGN.md
-- Diagrams: https://github.com/godaddy/enclave/tree/main/docs/diagrams
+- Product repository: https://github.com/godaddy/hardware-enclave
+- Design: https://github.com/godaddy/hardware-enclave/blob/main/DESIGN.md
+- Diagrams: https://github.com/godaddy/hardware-enclave/tree/main/docs/diagrams
 
 ## Monitoring/Alerting
 

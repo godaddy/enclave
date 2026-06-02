@@ -264,7 +264,7 @@ pub enum Error {
 
 ## Decisions
 
-1. **Crate name:** `enclave` — free on crates.io. Repo renamed `godaddy/enclave`.
+1. **Crate name:** `enclave` — free on crates.io. Repo renamed `godaddy/hardware-enclave`.
 
 2. **LockedBuffer registry:** Included — matters when FFI callers may not cleanly drop handles.
 

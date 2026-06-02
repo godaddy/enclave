@@ -34,7 +34,7 @@ AWS `credential_process` JSON, git credential helper). Use `SignerHandle` and
 zeroized after the child exits. The child inherits `RLIMIT_CORE=0` on Unix.
 
 ```rust
-use enclave::SecureProcess;
+use hardware_enclave::SecureProcess;
 
 SecureProcess::new("/usr/bin/npm")
     .args(["install"])
@@ -58,7 +58,7 @@ after `exec()` — use `run()` when zeroization matters.
 - **Windows**: restricted-permission temp directory, shredded on drop.
 
 ```rust
-use enclave::TempSecretFile;
+use hardware_enclave::TempSecretFile;
 
 let tmp = TempSecretFile::create(config_content)?;
 // Pass tmp.path() to the target program as a --config flag.
@@ -74,7 +74,7 @@ them with hardware-backed encryption. The credential lifecycle is managed by
 `CredentialState` and `LifecyclePolicy`.
 
 ```rust
-use enclave::{classify_credential, CredentialState, LifecyclePolicy};
+use hardware_enclave::{classify_credential, CredentialState, LifecyclePolicy};
 
 struct MyPolicy;
 impl LifecyclePolicy for MyPolicy {

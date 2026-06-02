@@ -125,7 +125,7 @@ fn run_with_mock() -> Result<(), Box<dyn std::error::Error>> {
 // ── Hardware path ─────────────────────────────────────────────────────────────
 
 fn run_with_hardware() -> Result<(), Box<dyn std::error::Error>> {
-    use enclave::{create_encryptor, AccessPolicy, EnclaveConfig};
+    use hardware_enclave::{create_encryptor, AccessPolicy, EnclaveConfig};
 
     println!("[hardware] Using platform HSM backend.");
 

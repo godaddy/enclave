@@ -1,6 +1,6 @@
 # Threat Model
 
-This document describes the threats the `enclave` crate defends against,
+This document describes the threats the `hardware-enclave` crate defends against,
 the threats it does not defend against, and the residual risks that
 consuming applications must address.
 

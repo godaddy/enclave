@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/enclave",
+    "crates/hardware-enclave",
     "crates/enclaveapp-core",
     "crates/enclaveapp-apple",
     "crates/enclaveapp-windows",
@@ -24,11 +24,11 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
-repository = "https://github.com/godaddy/enclave"
+repository = "https://github.com/godaddy/hardware-enclave"
 
 [workspace.dependencies]
 # Internal crates
-enclave = { path = "crates/enclave" }
+hardware-enclave = { path = "crates/hardware-enclave" }
 enclaveapp-core = { path = "crates/enclaveapp-core" }
 enclaveapp-apple = { path = "crates/enclaveapp-apple" }
 enclaveapp-windows = { path = "crates/enclaveapp-windows" }
