@@ -10,7 +10,21 @@
 //! `DisabledByPolicy`) it falls back to this module, which prompts for
 //! the current user's Windows credentials via
 //! `CredUIPromptForWindowsCredentialsW` and validates them with
-//! `LogonUserW(LOGON32_LOGON_NETWORK)`.
+//! `LogonUserW` (network logon).
+//!
+//! ## Username/domain splitting (the important bit)
+//!
+//! `LogonUserW` only validates an AD domain account when the **domain is
+//! passed separately** from the username: `LogonUserW("jgowdy", "JOMAX",
+//! ...)` succeeds, but `LogonUserW("JOMAX\\jgowdy", NULL, ...)` returns
+//! `ERROR_LOGON_FAILURE` for the *correct* password. `CredUnPackAuthen-
+//! ticationBufferW` sometimes returns the identity as `DOMAIN\user` in the
+//! username field with an empty domain field, so we split a leading
+//! `DOMAIN\` back out before calling `LogonUserW`. (This was the original
+//! "invalid password over and over" bug.) Validated on a real JOMAX
+//! domain account; an SSPI NTLM-loopback approach was tried and abandoned
+//! because Windows' loopback/reflection protection denies even a correct
+//! password.
 //!
 //! ## Why this exists
 //!
@@ -24,22 +38,23 @@
 //!
 //! Identical posture to [`crate::hello_gate`]: this is a **soft gate**.
 //! The verification is a Boolean computed in the calling process; a
-//! same-UID attacker with code execution can hook `LogonUserW`'s result
-//! or invoke the TPM key operation directly. It is a user-presence
-//! consent signal, not a hard cryptographic boundary against same-UID
-//! malware. The plaintext password lives in process memory only for the
-//! duration of the `LogonUserW` call and is zeroized immediately after.
+//! same-UID attacker with code execution can hook the result or invoke
+//! the TPM key operation directly. It is a user-presence consent signal,
+//! not a hard cryptographic boundary against same-UID malware. The
+//! plaintext password lives in process memory only for the `LogonUserW`
+//! call and is zeroized immediately after.
 //!
 //! ## Outcomes
 //!
 //! [`verify_current_user`] returns a [`PresenceOutcome`]:
 //! - [`PresenceOutcome::Verified`] — the user proved presence; proceed.
-//! - [`PresenceOutcome::Denied`] — the user cancelled or exhausted
-//!   retries; the caller treats this as access denied.
+//! - [`PresenceOutcome::Denied`] — the user cancelled or entered a wrong
+//!   password too many times; the caller treats this as access denied.
 //! - [`PresenceOutcome::Unavailable`] — no prompt could be shown or the
-//!   account cannot be validated this way (headless session, API
-//!   failure, passwordless/unsupported account). The caller degrades to
-//!   no presence prompt; the credential bundle remains TPM-encrypted.
+//!   account cannot be validated here (headless session, no reachable
+//!   domain controller, logon-type not granted). The caller degrades to
+//!   no presence prompt; the bundle remains TPM-encrypted. A *wrong
+//!   password* is `Denied`, not `Unavailable`.
 
 #![allow(unsafe_code)]
 
@@ -77,10 +92,9 @@ pub enum PresenceOutcome {
 const ERROR_SUCCESS_CODE: u32 = 0;
 /// The user dismissed the credential dialog.
 const ERROR_CANCELLED_CODE: u32 = 1223; // ERROR_CANCELLED
-/// Win32 `ERROR_LOGON_FAILURE`; passed back to the dialog as `dwAuthError`
-/// so a re-prompt shows the "the password is incorrect" hint, and used to
-/// distinguish a wrong password (retry) from an unvalidatable account
-/// (degrade).
+/// Win32 `ERROR_LOGON_FAILURE` — wrong username/password. Also passed
+/// back to the dialog as `dwAuthError` on a re-prompt so it shows the
+/// "the password is incorrect" hint.
 const ERROR_LOGON_FAILURE_CODE: u32 = 1326;
 /// How many times to re-prompt on a wrong password before denying.
 const MAX_ATTEMPTS: u32 = 3;
@@ -92,9 +106,9 @@ const MAX_ATTEMPTS: u32 = 3;
 /// credentials"). See the module docs for the outcome semantics and the
 /// threat-model trade-off.
 pub fn verify_current_user(reason: &str) -> PresenceOutcome {
-    // SAFETY: all pointers handed to the Win32 calls below are either
-    // null or point at live, correctly-sized stack/heap buffers for the
-    // duration of each call; see the inner function for per-call notes.
+    // SAFETY: every pointer handed to the Win32 calls below is either null
+    // or points at a live, correctly-sized buffer for the duration of the
+    // call; see the inner functions for per-call notes.
     unsafe { verify_current_user_inner(reason) }
 }
 
@@ -177,6 +191,11 @@ enum AuthCheck {
     Unavailable(String),
 }
 
+/// Number of `u16` code units before the first NUL.
+fn wlen(buf: &[u16]) -> usize {
+    buf.iter().position(|&c| c == 0).unwrap_or(buf.len())
+}
+
 /// Unpack the credential blob from `CredUIPromptForWindowsCredentialsW`
 /// and validate it with a network logon. All secret buffers are zeroized
 /// before return.
@@ -191,9 +210,6 @@ unsafe fn verify_auth_buffer(buf: *mut core::ffi::c_void, size: u32) -> AuthChec
     let mut user_len: u32 = 0;
     let mut domain_len: u32 = 0;
     let mut pass_len: u32 = 0;
-    // Expected to fail with insufficient-buffer; the lengths are written
-    // regardless. `drop` matches the crate convention for discarding a
-    // Result whose Err carries a destructor.
     drop(CredUnPackAuthenticationBufferW(
         CRED_PACK_FLAGS(0),
         buf,
@@ -231,17 +247,31 @@ unsafe fn verify_auth_buffer(buf: *mut core::ffi::c_void, size: u32) -> AuthChec
         return AuthCheck::Unavailable("could not unpack credentials".into());
     }
 
-    // UPN-form usernames (user@domain) carry the whole identity in the
-    // username field with an empty domain; pass NULL domain in that case.
-    let domain_ptr = if domain_len > 1 && domain[0] != 0 {
-        PCWSTR(domain.as_ptr())
+    // LogonUserW requires the domain passed *separately*; a `DOMAIN\user`
+    // string with a NULL domain fails with ERROR_LOGON_FAILURE even for
+    // the correct password. Prefer the unpacked domain field; if it is
+    // empty but the username carries a `DOMAIN\` prefix, split it back
+    // out. (user/domain are not secret; only the password is.)
+    let user_str = String::from_utf16_lossy(&user[..wlen(&user)]);
+    let domain_str = String::from_utf16_lossy(&domain[..wlen(&domain)]);
+    let (eff_user, eff_domain) = if !domain_str.is_empty() {
+        (user_str, domain_str)
+    } else if let Some((dom, usr)) = user_str.split_once('\\') {
+        (usr.to_string(), dom.to_string())
     } else {
+        (user_str, String::new())
+    };
+    let user_w: Vec<u16> = eff_user.encode_utf16().chain(once(0)).collect();
+    let domain_w: Vec<u16> = eff_domain.encode_utf16().chain(once(0)).collect();
+    let domain_ptr = if eff_domain.is_empty() {
         PCWSTR(null())
+    } else {
+        PCWSTR(domain_w.as_ptr())
     };
 
     let mut token = HANDLE::default();
     let logon = LogonUserW(
-        PCWSTR(user.as_ptr()),
+        PCWSTR(user_w.as_ptr()),
         domain_ptr,
         PCWSTR(password.as_ptr()),
         LOGON32_LOGON_NETWORK,
@@ -249,10 +279,10 @@ unsafe fn verify_auth_buffer(buf: *mut core::ffi::c_void, size: u32) -> AuthChec
         &mut token,
     );
 
-    // Scrub secrets the instant they are no longer needed.
+    // Scrub the password the instant it is no longer needed.
+    password.zeroize();
     user.zeroize();
     domain.zeroize();
-    password.zeroize();
 
     match logon {
         Ok(()) => {
@@ -267,9 +297,8 @@ unsafe fn verify_auth_buffer(buf: *mut core::ffi::c_void, size: u32) -> AuthChec
             if win32 == ERROR_LOGON_FAILURE_CODE {
                 AuthCheck::WrongPassword
             } else {
-                // The account cannot be validated via LogonUser on this
-                // host (e.g. network-logon right denied, passwordless
-                // account). Degrade rather than lock the user out.
+                // Cannot validate here (no reachable DC, logon-type not
+                // granted, etc.) — degrade rather than lock the user out.
                 AuthCheck::Unavailable(format!("LogonUserW could not validate the account: {err}"))
             }
         }
@@ -281,8 +310,7 @@ mod tests {
     use super::*;
 
     /// The Win32 codes the prompt loop branches on must match the
-    /// platform definitions. A silent drift here would turn "user
-    /// cancelled" into "degrade" (or vice versa), changing the gate's
+    /// platform definitions. A silent drift here would change the gate's
     /// deny/allow semantics. The interactive prompt itself is not
     /// unit-testable (it requires an attended desktop), so pin the
     /// constants instead.
@@ -295,7 +323,7 @@ mod tests {
 
     /// Document the deny/allow contract of the three outcomes so a
     /// refactor can't quietly collapse "denied" (block decrypt) into
-    /// "unavailable" (degrade and decrypt) without this test noticing.
+    /// "unavailable" (degrade and decrypt).
     #[test]
     fn outcomes_carry_the_expected_shape() {
         let denied = PresenceOutcome::Denied("cancelled".into());
@@ -306,5 +334,13 @@ mod tests {
             PresenceOutcome::Verified,
             PresenceOutcome::Verified
         ));
+    }
+
+    /// `wlen` stops at the first NUL and tolerates an unterminated slice.
+    #[test]
+    fn wlen_stops_at_nul() {
+        assert_eq!(wlen(&[b'a' as u16, b'b' as u16, 0, b'c' as u16]), 2);
+        assert_eq!(wlen(&[b'x' as u16, b'y' as u16]), 2);
+        assert_eq!(wlen(&[0]), 0);
     }
 }

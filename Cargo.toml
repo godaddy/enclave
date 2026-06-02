@@ -39,8 +39,13 @@ enclaveapp-test-software = { path = "crates/enclaveapp-test-software" }
 enclaveapp-keyring = { path = "crates/enclaveapp-keyring" }
 enclaveapp-linux-tpm = { path = "crates/enclaveapp-linux-tpm" }
 enclaveapp-test-support = { path = "crates/enclaveapp-test-support" }
-enclaveapp-app-storage = { path = "crates/enclaveapp-app-storage" }
-enclaveapp-app-adapter = { path = "crates/enclaveapp-app-adapter" }
+# default-features = false so that workspace members can opt out of the
+# `linux-tpm` (libtss2) backend by not enabling it; members that want it
+# forward `enclaveapp-app-storage/linux-tpm` via their own `linux-tpm`
+# feature. (Cargo ignores a member's `default-features = false` on a
+# `workspace = true` dep unless the workspace entry sets it here.)
+enclaveapp-app-storage = { path = "crates/enclaveapp-app-storage", default-features = false }
+enclaveapp-app-adapter = { path = "crates/enclaveapp-app-adapter", default-features = false }
 enclaveapp-cache = { path = "crates/enclaveapp-cache" }
 enclaveapp-tpm-bridge = { path = "crates/enclaveapp-tpm-bridge" }
 enclaveapp-build-support = { path = "crates/enclaveapp-build-support" }

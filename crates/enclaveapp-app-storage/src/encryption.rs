@@ -48,7 +48,7 @@ enum StorageInner {
     #[cfg(target_os = "windows")]
     WindowsDpapi(enclaveapp_windows::DpapiEncryptor),
 
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(all(target_os = "linux", target_env = "gnu", feature = "linux-tpm"))]
     LinuxTpm(enclaveapp_linux_tpm::LinuxTpmEncryptor),
 
     #[cfg(target_os = "linux")]
@@ -368,7 +368,7 @@ impl AppEncryptionStorage {
 
     #[cfg(target_os = "linux")]
     fn init_linux(config: &StorageConfig) -> Result<Self> {
-        #[cfg(target_env = "gnu")]
+        #[cfg(all(target_env = "gnu", feature = "linux-tpm"))]
         if enclaveapp_linux_tpm::is_available() {
             let keys_dir = Self::resolved_keys_dir(config);
             let encryptor = enclaveapp_linux_tpm::LinuxTpmEncryptor::with_keys_dir(
@@ -669,7 +669,7 @@ impl AppEncryptionStorage {
             #[cfg(target_os = "windows")]
             StorageInner::WindowsDpapi(e) => e,
 
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(all(target_os = "linux", target_env = "gnu", feature = "linux-tpm"))]
             StorageInner::LinuxTpm(e) => e,
 
             #[cfg(target_os = "linux")]
@@ -699,7 +699,7 @@ impl AppEncryptionStorage {
             #[cfg(target_os = "windows")]
             StorageInner::WindowsDpapi(e) => e,
 
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(all(target_os = "linux", target_env = "gnu", feature = "linux-tpm"))]
             StorageInner::LinuxTpm(e) => e,
 
             #[cfg(target_os = "linux")]
@@ -745,7 +745,7 @@ impl EncryptionStorage for AppEncryptionStorage {
                 .encrypt(&self.key_label, plaintext)
                 .map_err(|e| StorageError::EncryptionFailed(e.to_string())),
 
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(all(target_os = "linux", target_env = "gnu", feature = "linux-tpm"))]
             StorageInner::LinuxTpm(enc) => enc
                 .encrypt(&self.key_label, plaintext)
                 .map_err(|e| StorageError::EncryptionFailed(e.to_string())),
@@ -790,7 +790,7 @@ impl EncryptionStorage for AppEncryptionStorage {
                 .decrypt(&self.key_label, ciphertext)
                 .map_err(|e| StorageError::DecryptionFailed(e.to_string())),
 
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(all(target_os = "linux", target_env = "gnu", feature = "linux-tpm"))]
             StorageInner::LinuxTpm(enc) => enc
                 .decrypt(&self.key_label, ciphertext)
                 .map_err(|e| StorageError::DecryptionFailed(e.to_string())),
@@ -824,7 +824,7 @@ impl EncryptionStorage for AppEncryptionStorage {
                 .delete_key(&self.key_label)
                 .map_err(|e| StorageError::KeyNotFound(e.to_string())),
 
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(all(target_os = "linux", target_env = "gnu", feature = "linux-tpm"))]
             StorageInner::LinuxTpm(enc) => enc
                 .delete_key(&self.key_label)
                 .map_err(|e| StorageError::KeyNotFound(e.to_string())),

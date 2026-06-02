@@ -31,7 +31,7 @@ enum SigningInner {
     #[cfg(target_os = "windows")]
     Tpm(enclaveapp_windows::TpmSigner),
 
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(all(target_os = "linux", target_env = "gnu", feature = "linux-tpm"))]
     LinuxTpm(enclaveapp_linux_tpm::LinuxTpmSigner),
 
     #[cfg(target_os = "linux")]
@@ -249,7 +249,7 @@ impl AppSigningBackend {
         // error far away from the real cause.
         let prior = backend_marker::read(&config.app_name).ok().flatten();
 
-        #[cfg(target_env = "gnu")]
+        #[cfg(all(target_env = "gnu", feature = "linux-tpm"))]
         if enclaveapp_linux_tpm::is_available() {
             let keys_dir = config
                 .keys_dir
@@ -363,7 +363,7 @@ impl AppSigningBackend {
             #[cfg(target_os = "windows")]
             SigningInner::Tpm(s) => s,
 
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(all(target_os = "linux", target_env = "gnu", feature = "linux-tpm"))]
             SigningInner::LinuxTpm(s) => s,
 
             #[cfg(target_os = "linux")]
@@ -383,7 +383,7 @@ impl AppSigningBackend {
             #[cfg(target_os = "windows")]
             SigningInner::Tpm(s) => s,
 
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(all(target_os = "linux", target_env = "gnu", feature = "linux-tpm"))]
             SigningInner::LinuxTpm(s) => s,
 
             #[cfg(target_os = "linux")]
