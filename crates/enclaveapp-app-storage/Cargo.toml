@@ -11,7 +11,16 @@ description = "High-level application storage for hardware-backed key management
 workspace = true
 
 [features]
-default = []
+# `linux-tpm` is on by default to preserve existing behavior for
+# consumers that want the Linux hardware-TPM backend. It pulls in
+# `tss-esapi`, which links `libtss2` as a hard runtime (`DT_NEEDED`)
+# dependency — so a binary that does not need it (e.g. one that only
+# ever uses the keyring backend or the WSL→Windows bridge) should
+# disable default features to avoid requiring `libtss2` to be installed
+# just to start. Disabling it does not affect the keyring backend, which
+# carries no tss dependency.
+default = ["linux-tpm"]
+linux-tpm = ["dep:enclaveapp-linux-tpm"]
 # Mock backend. Opt-in at compile time ONLY — release binaries must
 # not include it (a runtime flag in a production build would let an
 # attacker swap the hardware-backed store for an AES-in-RAM mock).
@@ -44,4 +53,4 @@ enclaveapp-windows = { workspace = true, features = ["signing", "encryption"] }
 enclaveapp-keyring = { workspace = true, features = ["signing", "encryption"] }
 enclaveapp-bridge = { workspace = true }
 enclaveapp-wsl = { workspace = true }
-enclaveapp-linux-tpm = { workspace = true, features = ["signing", "encryption"] }
+enclaveapp-linux-tpm = { workspace = true, features = ["signing", "encryption"], optional = true }
