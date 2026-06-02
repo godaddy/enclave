@@ -45,7 +45,7 @@ pub use encryption::EncryptorHandle;
 pub use error::{Error, Result};
 pub use exec::{IntegrationType, SecureProcess, TempSecretFile};
 pub use factory::{create_auth, create_encryptor, create_signer, create_tamper_evident};
-pub use integrity::{TamperEvidentHandle, VerifyOutcome};
+pub use integrity::{IntegrityMode, TamperEvidentHandle, VerifyOutcome};
 pub use memory::{
     coffer_view, init_pool, pool_acquire, pool_release, zeroize_all_registered_at_shutdown,
     LockedBuffer, MemoryEnclave, PoolSlot, SecureBuffer, TieredPool, TieredPoolConfig,
