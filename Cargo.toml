@@ -92,6 +92,7 @@ rand = "0.9"
 
 # Tracing
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 
 # Build support
 winresource = "0.1"
