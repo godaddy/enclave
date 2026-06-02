@@ -161,10 +161,14 @@ mod tests {
     use crate::factory::create_auth;
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn request_presence_never_panics() {
-        // Skip if biometrics are available — calling request_presence would block
-        // waiting for the user to respond to a Touch ID / Windows Hello prompt.
-        // On CI (no enrolled biometrics), this path always takes the fast error return.
+        // Skip on Windows entirely: request_presence() always requires a GUI prompt
+        // (Hello or password dialog). Even when Hello is not enrolled, the Windows
+        // fallback shows CredUIPromptForWindowsCredentialsW which blocks on headless CI.
+        //
+        // On macOS: skip if Touch ID is available (would block waiting for biometric).
+        // On Linux: always safe — returns PresenceNotAvailable immediately.
         if platform_auth_capabilities().biometric_available {
             return;
         }
@@ -211,13 +215,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn request_presence_returns_not_available_when_no_biometric() {
-        // Only runs when the current platform reports no biometric/passcode.
-        // On macOS CI (no enrolled Touch ID), this verifies the fast error path.
-        // On a dev machine with Touch ID enrolled, this test is skipped to avoid
-        // blocking on the biometric prompt.
+        // Skipped on Windows: request_presence always requires GUI interaction
+        // (Hello or password dialog) — no fast-path error for missing biometrics.
         if platform_auth_capabilities().biometric_available {
-            // Touch ID / Windows Hello is enrolled — skip to avoid interactive prompt.
             return;
         }
         let config = EnclaveConfig::new("testapp", "key");
