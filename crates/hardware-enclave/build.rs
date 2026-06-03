@@ -52,7 +52,14 @@ fn xcrun_find(tool: &str) -> PathBuf {
 }
 
 fn main() {
-    // Only build Swift bridge on macOS
+    // Only build Swift bridge on macOS when key management features are active.
+    // Memory-only builds (default-features = false, features = ["memory"]) skip
+    // this entirely — no Xcode, no swiftc, no platform SDK required.
+    let has_key_mgmt =
+        env::var("CARGO_FEATURE_SIGNING").is_ok() || env::var("CARGO_FEATURE_ENCRYPTION").is_ok();
+    if !has_key_mgmt {
+        return;
+    }
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "macos" {
         return;
     }

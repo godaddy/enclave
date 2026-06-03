@@ -1,5 +1,6 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
+#![cfg(any(feature = "signing", feature = "encryption"))]
 
 //! CI harness: compiles and runs each example in non-interactive mode to
 //! verify they work correctly without hardware, without Keychain access,

@@ -1,6 +1,6 @@
 [package]
 name = "hardware-enclave"
-description = "Hardware-backed key management — macOS Secure Enclave, Windows TPM 2.0, Linux TPM/keyring"
+description = "Hardware-backed key management — macOS Secure Enclave, Windows TPM 2.0, Linux TPM/keyring — plus in-process memory protection"
 keywords   = ["security", "tpm", "secure-enclave", "cryptography", "memory-protection"]
 categories = ["cryptography", "os", "hardware-support"]
 documentation = "https://docs.rs/hardware-enclave"
@@ -11,47 +11,100 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+# ── Always-present: needed by the memory protection subsystem ────────────────
 aes-gcm        = { workspace = true }
-anyhow         = { workspace = true }
-base64         = { workspace = true }
-ciborium       = { workspace = true }
-dirs           = { workspace = true }
-elliptic-curve = { workspace = true }
-fs2            = { workspace = true }
-fs4            = { workspace = true }
 libc           = { workspace = true }
-p256           = { workspace = true }
 rand           = { workspace = true }
-serde          = { workspace = true }
-serde_json     = { workspace = true }
 sha2           = { workspace = true }
-shlex          = { workspace = true }
 subtle         = { workspace = true }
-tempfile       = { workspace = true }
 thiserror      = { workspace = true }
-toml           = { workspace = true }
 tracing        = { workspace = true }
 zeroize        = { workspace = true }
 
+# ── Key-management deps: only compiled with signing or encryption ─────────────
+anyhow         = { workspace = true, optional = true }
+base64         = { workspace = true, optional = true }
+ciborium       = { workspace = true, optional = true }
+dirs           = { workspace = true, optional = true }
+elliptic-curve = { workspace = true, optional = true }
+fs2            = { workspace = true, optional = true }
+fs4            = { workspace = true, optional = true }
+p256           = { workspace = true, optional = true }
+serde          = { workspace = true, optional = true }
+serde_json     = { workspace = true, optional = true }
+shlex          = { workspace = true, optional = true }
+tempfile       = { workspace = true, optional = true }
+toml           = { workspace = true, optional = true }
+
 [target.'cfg(target_os = "windows")'.dependencies]
-windows      = { workspace = true }
-winresource  = { workspace = true }
+windows      = { workspace = true, optional = true }
+winresource  = { workspace = true, optional = true }
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
-keyring   = { workspace = true }
-tss-esapi = { workspace = true }
+keyring   = { workspace = true, optional = true }
+tss-esapi = { workspace = true, optional = true }
 
 [features]
-# `linux-tpm` (on by default) pulls in the Linux hardware-TPM backend
-# and its `libtss2`/tss-esapi link. Consumers that only use the keyring
-# backend or the WSL→Windows bridge set `default-features = false` so the
-# binary does not require `libtss2` to be installed to start.
-default = ["signing", "encryption"]
+# ── Default: full key management + memory protection ─────────────────────────
+default = ["signing", "encryption", "memory"]
+
+# ── memory: in-process memory protection (SecureBuffer, LockedBuffer,
+#    MemoryEnclave, TieredPool, harden_process). Zero platform HSM deps.
+#    Use with `default-features = false, features = ["memory"]` to get
+#    a lightweight build suitable for libraries like asherah-ffi that only
+#    need the memory hardening primitives.
+memory = []
+
+# ── signing: P-256 ECDSA signing via platform HSM (Secure Enclave / TPM / keyring)
+signing = [
+    "dep:anyhow",
+    "dep:base64",
+    "dep:ciborium",
+    "dep:dirs",
+    "dep:elliptic-curve",
+    "dep:fs2",
+    "dep:fs4",
+    "dep:p256",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:shlex",
+    "dep:tempfile",
+    "dep:toml",
+    "dep:windows",
+    "dep:winresource",
+    "dep:keyring",
+    "dep:tss-esapi",
+]
+
+# ── encryption: ECIES P-256 encryption via platform HSM. Implies signing deps.
+encryption = ["signing"]
+
+# ── linux-tpm: opt-in native Linux TPM 2.0 backend (requires libtss2).
+#    Off by default since most Linux consumers use the keyring backend or the
+#    WSL→Windows bridge. Enable explicitly when native TPM 2.0 is required.
 linux-tpm = []
+
+# ── keyring-storage: D-Bus Secret Service backed key storage (Linux only).
 keyring-storage = []
-signing = []
-encryption = []
+
+# ── mock: MockEncryptionStorage for testing. Never compiled into release builds.
 mock = []
+
+[[example]]
+name = "signing"
+required-features = ["signing"]
+
+[[example]]
+name = "encryption"
+required-features = ["encryption"]
+
+[[example]]
+name = "integrity"
+required-features = ["signing", "encryption"]
+
+[[test]]
+name = "examples_ci"
+required-features = ["signing", "encryption"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

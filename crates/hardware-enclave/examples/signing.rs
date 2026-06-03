@@ -1,5 +1,6 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
+#![cfg(any(feature = "signing", feature = "encryption"))]
 
 //! Demonstrates signing key lifecycle and ECDSA P-256 signing.
 //!

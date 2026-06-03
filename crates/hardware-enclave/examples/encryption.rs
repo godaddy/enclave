@@ -1,5 +1,6 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
+#![cfg(any(feature = "signing", feature = "encryption"))]
 
 //! Demonstrates encryption key lifecycle and ECIES encrypt/decrypt.
 //!

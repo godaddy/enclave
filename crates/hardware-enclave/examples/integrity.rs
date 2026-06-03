@@ -1,5 +1,6 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
+#![cfg(any(feature = "signing", feature = "encryption"))]
 
 //! Demonstrates tamper-evident file protection.
 //!

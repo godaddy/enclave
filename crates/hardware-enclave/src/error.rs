@@ -81,6 +81,8 @@ pub enum Error {
 /// Shorthand `Result` type for this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Conversions from internal error types — only available when key management features are active.
+#[cfg(any(feature = "signing", feature = "encryption"))]
 impl From<crate::internal::core::Error> for Error {
     #[allow(unreachable_patterns)]
     fn from(e: crate::internal::core::Error) -> Self {
@@ -123,6 +125,7 @@ impl From<crate::internal::core::Error> for Error {
     }
 }
 
+#[cfg(any(feature = "signing", feature = "encryption"))]
 impl From<crate::internal::app_storage::StorageError> for Error {
     #[allow(unreachable_patterns)]
     fn from(e: crate::internal::app_storage::StorageError) -> Self {
@@ -154,7 +157,7 @@ impl From<crate::internal::app_storage::StorageError> for Error {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "signing", feature = "encryption")))]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
