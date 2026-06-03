@@ -47,11 +47,15 @@ pub mod encryption;
 pub mod error;
 pub mod exec;
 pub mod factory;
+pub mod fs;
 pub mod integrity;
 pub mod memory;
+pub mod process;
 pub mod security_key;
+pub mod shell;
 pub mod signing;
 pub mod types;
+pub mod wsl;
 
 // Top-level re-exports for ergonomic use.
 pub use auth::{platform_auth_capabilities, AuthCapabilities, AuthHandle};
