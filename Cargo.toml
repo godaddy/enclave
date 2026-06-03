@@ -1,6 +1,30 @@
 [workspace]
 members = [
     "crates/hardware-enclave",
+    # Support crates still used via path deps by consuming repos:
+    #   enclaveapp-core, enclaveapp-test-software — sshenc force-software feature
+    #   enclaveapp-tpm-bridge — sshenc-tpm-bridge binary
+    #   enclaveapp-bridge, enclaveapp-windows, enclaveapp-windows-webauthn — tpm-bridge deps
+    #   enclaveapp-test-support — hardware-enclave dev tests
+    "crates/enclaveapp-core",
+    "crates/enclaveapp-test-software",
+    "crates/enclaveapp-test-support",
+    "crates/enclaveapp-tpm-bridge",
+    "crates/enclaveapp-bridge",
+    "crates/enclaveapp-windows",
+    "crates/enclaveapp-windows-webauthn",
+]
+# Pure implementation crates whose code now lives inside hardware-enclave/src/internal/.
+# Kept in the repository for reference but excluded from the workspace.
+exclude = [
+    "crates/enclaveapp-apple",
+    "crates/enclaveapp-linux-tpm",
+    "crates/enclaveapp-wsl",
+    "crates/enclaveapp-keyring",
+    "crates/enclaveapp-app-storage",
+    "crates/enclaveapp-app-adapter",
+    "crates/enclaveapp-cache",
+    "crates/enclaveapp-build-support",
 ]
 resolver = "2"
 

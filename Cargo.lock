@@ -333,6 +333,98 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclaveapp-bridge"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "enclaveapp-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "enclaveapp-core"
+version = "0.2.0"
+dependencies = [
+ "dirs",
+ "fs2",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "toml 0.8.23",
+ "tracing",
+ "windows",
+]
+
+[[package]]
+name = "enclaveapp-test-software"
+version = "0.2.0"
+dependencies = [
+ "aes-gcm",
+ "dirs",
+ "elliptic-curve",
+ "enclaveapp-core",
+ "p256",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
+name = "enclaveapp-test-support"
+version = "0.2.0"
+dependencies = [
+ "enclaveapp-core",
+ "rand",
+ "serde_json",
+]
+
+[[package]]
+name = "enclaveapp-tpm-bridge"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "enclaveapp-bridge",
+ "enclaveapp-core",
+ "enclaveapp-windows",
+ "enclaveapp-windows-webauthn",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "enclaveapp-windows"
+version = "0.2.0"
+dependencies = [
+ "aes-gcm",
+ "dirs",
+ "elliptic-curve",
+ "enclaveapp-core",
+ "p256",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
+ "windows",
+ "zeroize",
+]
+
+[[package]]
+name = "enclaveapp-windows-webauthn"
+version = "0.2.0"
+dependencies = [
+ "ciborium",
+ "enclaveapp-core",
+ "thiserror",
+ "windows",
+]
+
+[[package]]
 name = "enumflags2"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
