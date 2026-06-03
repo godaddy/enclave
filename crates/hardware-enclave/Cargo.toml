@@ -48,6 +48,7 @@ tss-esapi = { workspace = true }
 # binary does not require `libtss2` to be installed to start.
 default = ["signing", "encryption"]
 linux-tpm = []
+keyring-storage = []
 signing = []
 encryption = []
 mock = []
