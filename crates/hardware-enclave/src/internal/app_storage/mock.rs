@@ -228,6 +228,9 @@ impl EnclaveKeyManager for MockSigner {
         _key_type: KeyType,
         _policy: AccessPolicy,
     ) -> CoreResult<Vec<u8>> {
+        // Reject duplicates atomically: use OpenOptions::create_new so the
+        // first writer wins and concurrent callers get DuplicateLabel.
+        let key_path = self.key_path(label);
         let secret = SecretKey::random(&mut elliptic_curve::rand_core::OsRng);
         let pub_bytes = secret
             .public_key()
@@ -235,10 +238,26 @@ impl EnclaveKeyManager for MockSigner {
             .as_bytes()
             .to_vec();
         let key_bytes = Zeroizing::new(secret.to_bytes().to_vec());
-        std::fs::write(self.key_path(label), &*key_bytes).map_err(|e| CoreError::KeyOperation {
-            operation: "mock_save".into(),
-            detail: e.to_string(),
-        })?;
+        use std::io::Write;
+        let result = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&key_path)
+            .and_then(|mut f| f.write_all(&key_bytes));
+        match result {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(CoreError::DuplicateLabel {
+                    label: label.to_string(),
+                });
+            }
+            Err(e) => {
+                return Err(CoreError::KeyOperation {
+                    operation: "mock_save".into(),
+                    detail: e.to_string(),
+                });
+            }
+            Ok(()) => {}
+        }
         // Write SEC1 public key cache so list_labels() (which scans .pub files) finds it.
         std::fs::write(self.pub_path(label), &pub_bytes).map_err(|e| CoreError::KeyOperation {
             operation: "mock_save_pub".into(),
