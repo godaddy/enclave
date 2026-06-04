@@ -70,8 +70,7 @@ pub fn windows_backend_description() -> &'static str {
         return "✓ Windows ECIES P-256, Windows Data Protection API (user-bound)";
     }
 
-    let hello =
-        *HELLO_AVAILABLE.get_or_init(|| crate::internal::windows::hello_gate::is_available());
+    let hello = *HELLO_AVAILABLE.get_or_init(crate::internal::windows::hello_gate::is_available);
     if hello {
         "✓ Windows TPM 2.0 ECDH P-256 ECIES, Windows Hello gate"
     } else {
