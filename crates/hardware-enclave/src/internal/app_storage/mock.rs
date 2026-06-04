@@ -152,48 +152,69 @@ use p256::{
     ecdsa::{signature::Signer, DerSignature, SigningKey},
     SecretKey,
 };
-use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 /// Cross-platform mock signer for testing without hardware.
 ///
-/// Stores P-256 private keys in memory (keyed by label). Implements the same
-/// traits as the platform hardware backends so test code can use it via the
-/// normal `create_signer()` factory when `ENCLAVEAPP_MOCK_STORAGE` is set.
+/// Stores P-256 private keys as raw-bytes files in a temporary directory.
+/// Disk-backed so that multiple processes using the same app_name and
+/// `ENCLAVEAPP_MOCK_STORAGE` env share the same key store — critical for
+/// the sshenc architecture where the CLI and agent are separate processes.
 pub struct MockSigner {
-    keys: Mutex<BTreeMap<String, SecretKey>>,
+    keys_dir: PathBuf,
 }
 
 impl std::fmt::Debug for MockSigner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MockSigner").finish()
+        f.debug_struct("MockSigner")
+            .field("keys_dir", &self.keys_dir)
+            .finish()
     }
 }
 
 impl MockSigner {
-    pub fn new() -> Self {
-        Self {
-            keys: Mutex::new(BTreeMap::new()),
-        }
+    /// Create a mock signer that stores keys under `keys_dir`.
+    /// All MockSigner instances with the same `keys_dir` share the same keys.
+    pub fn with_keys_dir(keys_dir: PathBuf) -> Self {
+        drop(std::fs::create_dir_all(&keys_dir));
+        Self { keys_dir }
+    }
+
+    fn key_path(&self, label: &str) -> PathBuf {
+        self.keys_dir.join(format!("{label}.mock-key"))
     }
 }
 
 impl Default for MockSigner {
     fn default() -> Self {
-        Self::new()
+        Self::with_keys_dir(std::env::temp_dir().join("hardware-enclave-mock-signer"))
     }
 }
 
+// Safety: MockSigner only accesses files via std::fs which is Send+Sync.
 #[allow(unsafe_code)]
-// Safety: MockSigner uses Mutex for all interior mutability.
 unsafe impl Send for MockSigner {}
 #[allow(unsafe_code)]
 unsafe impl Sync for MockSigner {}
 
-fn lock_mock<'mutex>(
-    mutex: &'mutex Mutex<BTreeMap<String, SecretKey>>,
-) -> std::sync::MutexGuard<'mutex, BTreeMap<String, SecretKey>> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
+fn load_secret(path: &Path) -> CoreResult<SecretKey> {
+    if !path.exists() {
+        let label = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        return Err(CoreError::KeyNotFound { label });
+    }
+    let bytes = Zeroizing::new(std::fs::read(path).map_err(|e| CoreError::KeyOperation {
+        operation: "mock_load".into(),
+        detail: e.to_string(),
+    })?);
+    SecretKey::from_slice(&bytes).map_err(|e| CoreError::KeyOperation {
+        operation: "mock_parse".into(),
+        detail: e.to_string(),
+    })
 }
 
 impl EnclaveKeyManager for MockSigner {
@@ -209,30 +230,49 @@ impl EnclaveKeyManager for MockSigner {
             .to_encoded_point(false)
             .as_bytes()
             .to_vec();
-        lock_mock(&self.keys).insert(label.to_string(), secret);
+        let key_bytes = Zeroizing::new(secret.to_bytes().to_vec());
+        std::fs::write(self.key_path(label), &*key_bytes).map_err(|e| CoreError::KeyOperation {
+            operation: "mock_save".into(),
+            detail: e.to_string(),
+        })?;
         Ok(pub_bytes)
     }
 
     fn public_key(&self, label: &str) -> CoreResult<Vec<u8>> {
-        lock_mock(&self.keys)
-            .get(label)
-            .map(|k| k.public_key().to_encoded_point(false).as_bytes().to_vec())
-            .ok_or_else(|| CoreError::KeyNotFound {
-                label: label.to_string(),
-            })
+        let secret = load_secret(&self.key_path(label))?;
+        Ok(secret
+            .public_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec())
     }
 
     fn list_keys(&self) -> CoreResult<Vec<String>> {
-        Ok(lock_mock(&self.keys).keys().cloned().collect())
+        let mut labels = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&self.keys_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "mock-key").unwrap_or(false) {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        labels.push(stem.to_string());
+                    }
+                }
+            }
+        }
+        Ok(labels)
     }
 
     fn delete_key(&self, label: &str) -> CoreResult<()> {
-        lock_mock(&self.keys)
-            .remove(label)
-            .map(|_| ())
-            .ok_or_else(|| CoreError::KeyNotFound {
+        let path = self.key_path(label);
+        if !path.exists() {
+            return Err(CoreError::KeyNotFound {
                 label: label.to_string(),
-            })
+            });
+        }
+        std::fs::remove_file(&path).map_err(|e| CoreError::KeyOperation {
+            operation: "mock_delete".into(),
+            detail: e.to_string(),
+        })
     }
 
     fn is_available(&self) -> bool {
@@ -242,11 +282,8 @@ impl EnclaveKeyManager for MockSigner {
 
 impl EnclaveSigner for MockSigner {
     fn sign(&self, label: &str, data: &[u8]) -> CoreResult<Vec<u8>> {
-        let keys = lock_mock(&self.keys);
-        let secret = keys.get(label).ok_or_else(|| CoreError::KeyNotFound {
-            label: label.to_string(),
-        })?;
-        let signing_key = SigningKey::from(secret);
+        let secret = load_secret(&self.key_path(label))?;
+        let signing_key = SigningKey::from(&secret);
         let sig: DerSignature = signing_key.sign(data);
         Ok(sig.to_bytes().to_vec())
     }

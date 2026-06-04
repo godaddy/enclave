@@ -161,12 +161,18 @@ impl AppSigningBackend {
                 if !val.is_empty() {
                     tracing::warn!(
                         app = %config.app_name,
-                        "{MOCK_STORAGE_ENV} is set — returning in-memory mock signer (no hardware backing)"
+                        "{MOCK_STORAGE_ENV} is set — returning disk-backed mock signer (no hardware backing)"
                     );
+                    // Use a deterministic temp dir keyed by app_name so all
+                    // processes using the same app share the same key store.
+                    let keys_dir = config.keys_dir.clone().unwrap_or_else(|| {
+                        std::env::temp_dir()
+                            .join(format!("hardware-enclave-mock-signing-{}", config.app_name))
+                    });
                     return Ok(Self {
                         kind: BackendKind::Keyring,
                         inner: SigningInner::Mock(
-                            crate::internal::app_storage::mock::MockSigner::new(),
+                            crate::internal::app_storage::mock::MockSigner::with_keys_dir(keys_dir),
                         ),
                     });
                 }
