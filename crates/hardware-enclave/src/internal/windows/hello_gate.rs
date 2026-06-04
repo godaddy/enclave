@@ -55,7 +55,9 @@ use std::time::{Duration, Instant};
 
 use crate::internal::core::{Error, Result};
 use windows::core::HSTRING;
+use windows::Foundation::IAsyncOperation;
 use windows::Security::Credentials::UI::{UserConsentVerificationResult, UserConsentVerifier};
+use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
 
 /// In-process cache of recent Windows Hello verifications, keyed on
 /// caller-supplied scope strings. Construct once per app/encryptor and
@@ -146,17 +148,60 @@ pub fn is_available() -> bool {
 /// disabled by policy, etc.).
 fn prompt_user_consent(reason: &str) -> Result<()> {
     let reason_h = HSTRING::from(reason);
-    let async_op = UserConsentVerifier::RequestVerificationAsync(&reason_h).map_err(|e| {
+    // Prefer the foreground path so the dialog comes up focused. Any failure in
+    // the windowing / interop machinery falls back to the windowless prompt, so
+    // a foregrounding problem can never block credential decrypt.
+    let result = match request_verification_foreground(&reason_h) {
+        Ok(result) => result,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "foreground Hello prompt failed; falling back to windowless RequestVerificationAsync"
+            );
+            request_verification_windowless(&reason_h)?
+        }
+    };
+    interpret_consent_result(reason, result)
+}
+
+/// Foreground path: create a transient top-most owner window and request
+/// verification *for that window* via `IUserConsentVerifierInterop`, so the
+/// Hello dialog is activated in front of the user instead of behind whatever
+/// they're looking at.
+fn request_verification_foreground(
+    reason_h: &HSTRING,
+) -> windows::core::Result<UserConsentVerificationResult> {
+    use super::foreground_window::ForegroundOwner;
+    let interop = windows::core::factory::<UserConsentVerifier, IUserConsentVerifierInterop>()?;
+    let owner = ForegroundOwner::create()?;
+    owner.foreground();
+    // SAFETY: `owner` is a live top-level window we own; it is dropped only
+    // after the wait completes, so the HWND outlives the dialog it parents.
+    let async_op: IAsyncOperation<UserConsentVerificationResult> =
+        unsafe { interop.RequestVerificationForWindowAsync(owner.hwnd(), reason_h)? };
+    // Pump our owner window's messages while waiting — a blocking get() would
+    // deadlock since the dialog is modal to a window on this thread.
+    let result = super::foreground_window::pump_until_complete(&async_op)?;
+    drop(owner);
+    Ok(result)
+}
+
+/// Windowless fallback — the original behavior, preserved verbatim.
+fn request_verification_windowless(reason_h: &HSTRING) -> Result<UserConsentVerificationResult> {
+    let async_op = UserConsentVerifier::RequestVerificationAsync(reason_h).map_err(|e| {
         Error::KeyOperation {
             operation: "hello_request_verification".into(),
             detail: format!("UserConsentVerifier::RequestVerificationAsync: {e}"),
         }
     })?;
-    let result = async_op.get().map_err(|e| Error::KeyOperation {
+    async_op.get().map_err(|e| Error::KeyOperation {
         operation: "hello_await_result".into(),
         detail: format!("UserConsentVerifier async wait: {e}"),
-    })?;
+    })
+}
 
+/// Map a `UserConsentVerificationResult` to our `Result` (unchanged behavior).
+fn interpret_consent_result(reason: &str, result: UserConsentVerificationResult) -> Result<()> {
     match result {
         UserConsentVerificationResult::Verified => Ok(()),
         // Hello is not usable for this user on this host. Rather than

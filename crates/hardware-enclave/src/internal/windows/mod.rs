@@ -20,6 +20,8 @@ pub mod dpapi_fallback;
 #[cfg(target_os = "windows")]
 mod export;
 #[cfg(target_os = "windows")]
+mod foreground_window;
+#[cfg(target_os = "windows")]
 pub mod hello_gate;
 #[cfg(target_os = "windows")]
 mod key;
