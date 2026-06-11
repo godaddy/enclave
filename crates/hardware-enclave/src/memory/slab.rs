@@ -3,11 +3,12 @@
 
 #![allow(unsafe_code)]
 
-//! Single mlock'd page subdivided into fixed-size slots.
+//! Guard-paged, mlock'd slab subdivided into fixed-size slots.
 //!
-//! The slab occupies exactly one OS page (typically 4 KiB), mlock'd to
-//! prevent swap-out. It is subdivided into `floor(page_size / slot_size)`
-//! equal slots. This fits within the typical per-process mlock limit.
+//! Layout: [guard page (PROT_NONE)] [slab page, mlock'd] [guard page (PROT_NONE)].
+//! The slab page is subdivided into `floor(page_size / slot_size)` equal slots.
+//! Only the slab page is mlock'd, so this keeps the same locked-memory footprint
+//! as the previous one-page allocation while restoring overflow guard pages.
 //!
 //! When `init_coffer = true`, slots 0 (left) and 1 (right) are permanently
 //! reserved for the Coffer (master key halves). Remaining slots form a shared
@@ -21,7 +22,7 @@ use rand::TryRngCore;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use super::memcall::{os_lock, os_protect, os_unlock, page_size, Protection};
+use super::memcall::{os_alloc, os_free, os_lock, os_protect, os_unlock, page_size, Protection};
 use crate::error::{Error, Result};
 
 /// Default slot size in bytes (AES-256 key size, matching asherah-ffi).
@@ -47,6 +48,10 @@ pub(crate) const FIRST_SHARED_SLOT: usize = 2;
 /// When `has_coffer` is true, slots 0 (COFFER_LEFT) and 1 (COFFER_RIGHT) are
 /// permanently reserved and never appear in any of the three state lists.
 pub struct SecureSlab {
+    /// Pointer to the full guard+slab+guard allocation.
+    alloc_ptr: NonNull<u8>,
+    alloc_len: usize,
+    /// Pointer to the mlock'd slab page between guard pages.
     ptr: NonNull<u8>,
     page_size: usize,
     pub slot_size: usize,
@@ -106,14 +111,32 @@ impl SecureSlab {
             ));
         }
 
-        let ptr = unsafe { super::memcall::os_alloc(ps) }
+        let alloc_len = ps
+            .checked_mul(3)
+            .ok_or_else(|| Error::Memory("SecureSlab: allocation length overflow".into()))?;
+        let alloc_ptr = unsafe { os_alloc(alloc_len) }
             .map_err(|e| Error::Memory(format!("SecureSlab alloc: {e}")))?;
+        let ptr = unsafe { NonNull::new_unchecked(alloc_ptr.as_ptr().add(ps)) };
 
-        // mlock the entire page.
+        // mlock only the slab page; guard pages remain unlocked and inaccessible.
         if let Err(e) = unsafe { os_lock(ptr.as_ptr(), ps) } {
             // Clean up the allocation before returning the error.
-            drop(unsafe { super::memcall::os_free(ptr.as_ptr(), ps) });
+            drop(unsafe { os_free(alloc_ptr.as_ptr(), alloc_len) });
             return Err(Error::Memory(format!("SecureSlab mlock: {e}")));
+        }
+        if let Err(e) = unsafe { os_protect(alloc_ptr.as_ptr(), ps, Protection::NoAccess) } {
+            drop(unsafe { os_unlock(ptr.as_ptr(), ps) });
+            drop(unsafe { os_free(alloc_ptr.as_ptr(), alloc_len) });
+            return Err(Error::Memory(format!("SecureSlab pre-guard mprotect: {e}")));
+        }
+        if let Err(e) =
+            unsafe { os_protect(alloc_ptr.as_ptr().add(2 * ps), ps, Protection::NoAccess) }
+        {
+            drop(unsafe { os_unlock(ptr.as_ptr(), ps) });
+            drop(unsafe { os_free(alloc_ptr.as_ptr(), alloc_len) });
+            return Err(Error::Memory(format!(
+                "SecureSlab post-guard mprotect: {e}"
+            )));
         }
 
         // Build the free list: LIFO, so pop() gives the highest-index slot first
@@ -121,6 +144,8 @@ impl SecureSlab {
         let free: Vec<usize> = (FIRST_SHARED_SLOT..total_slots).collect();
 
         let mut slab = Self {
+            alloc_ptr,
+            alloc_len,
             ptr,
             page_size: ps,
             slot_size,
@@ -409,10 +434,10 @@ impl SecureSlab {
 
 impl Drop for SecureSlab {
     fn drop(&mut self) {
-        // SAFETY: ptr is valid for page_size bytes for the entire lifetime of this
-        // struct (allocated in new(), freed here). Restoring write access first
-        // ensures the subsequent zeroize and free calls succeed even if the page
-        // was left in a ReadOnly or NoAccess state.
+        // SAFETY: ptr is the middle page of alloc_ptr..alloc_ptr+alloc_len for the
+        // entire lifetime of this struct. Restoring write access first ensures the
+        // subsequent zeroize and unlock calls succeed even if the slab page was left
+        // in a ReadOnly or NoAccess state. Guard pages remain NoAccess until unmap.
         unsafe {
             drop(os_protect(
                 self.ptr.as_ptr(),
@@ -421,7 +446,7 @@ impl Drop for SecureSlab {
             ));
             std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.page_size).zeroize();
             drop(os_unlock(self.ptr.as_ptr(), self.page_size));
-            drop(super::memcall::os_free(self.ptr.as_ptr(), self.page_size));
+            drop(os_free(self.alloc_ptr.as_ptr(), self.alloc_len));
         }
     }
 }
@@ -437,6 +462,64 @@ mod tests {
         assert_eq!(slab.slot_size(), DEFAULT_SLOT_SIZE);
         assert!(slab.total_slots() >= 3);
         assert_eq!(slab.usable_slots(), slab.total_slots() - 2);
+    }
+
+    #[test]
+    fn slab_page_is_between_guard_pages() {
+        let slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
+        let ps = page_size();
+        assert_eq!(slab.page_size, ps);
+        assert_eq!(slab.alloc_len, ps * 3);
+        assert_eq!(
+            unsafe { slab.ptr.as_ptr().offset_from(slab.alloc_ptr.as_ptr()) } as usize,
+            ps
+        );
+        assert_eq!(slab.alloc_ptr.as_ptr() as usize % ps, 0);
+        assert_eq!(slab.ptr.as_ptr() as usize % ps, 0);
+        let post_guard = unsafe { slab.alloc_ptr.as_ptr().add(2 * ps) };
+        assert_eq!(
+            unsafe { post_guard.offset_from(slab.ptr.as_ptr()) } as usize,
+            ps
+        );
+        let (slot0, len) = slab.slot_raw(0).expect("slot 0 is valid");
+        assert_eq!(slot0, slab.ptr.as_ptr());
+        assert_eq!(len, DEFAULT_SLOT_SIZE);
+        let (slot1, len) = slab.slot_raw(1).expect("slot 1 is valid");
+        assert_eq!(
+            unsafe { slot1.offset_from(slot0) } as usize,
+            DEFAULT_SLOT_SIZE
+        );
+        assert_eq!(len, DEFAULT_SLOT_SIZE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guard_pages_fault_on_read() {
+        fn assert_read_faults(ptr: *const u8) {
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0, "fork failed");
+            if pid == 0 {
+                let _ = unsafe { std::ptr::read_volatile(ptr) };
+                unsafe { libc::_exit(0) };
+            }
+
+            let mut status = 0;
+            let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+            assert_eq!(waited, pid, "waitpid failed");
+            assert!(libc::WIFSIGNALED(status), "guard read did not signal");
+            let signal = libc::WTERMSIG(status);
+            assert!(
+                signal == libc::SIGSEGV || signal == libc::SIGBUS,
+                "expected SIGSEGV or SIGBUS, got {signal}"
+            );
+        }
+
+        let slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
+        let pre_guard = slab.alloc_ptr.as_ptr().cast_const();
+        let post_guard = unsafe { slab.alloc_ptr.as_ptr().add(2 * slab.page_size).cast_const() };
+
+        assert_read_faults(pre_guard);
+        assert_read_faults(post_guard);
     }
 
     #[test]
